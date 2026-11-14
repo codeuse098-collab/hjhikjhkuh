@@ -1,0 +1,2801 @@
+--[[
+  anti-neverlose.lua  |  PRO EDITION v6 (Authentic Neverlose Icons & Pool-Fixed UI)
+  RGBA Icons + Zero White-Border Bug + Persistent Resolver + Full Static Hit-Swap AA + DT-Only Defensive
+]]
+
+local EMBEDDED_CONFIG = [=[
+]=]
+
+local NAME = 'anti-neverlose.lua'
+local FORCED_TAG = 'antineverlose'
+
+local nui = ui
+pcall(nui.override_tab, 'AA')
+pcall(function() nui.new_label('anti-neverlose: окно скрипта открывается рядом с меню чита') end)
+
+local function clamp(v, a, b) return math.max(a, math.min(b, v)) end
+local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
+local function nyaw(a) return utils.normalize_yaw(a) end
+local function adiff(a, b)
+  if utils.angle_diff then return utils.angle_diff(a, b) end
+  return nyaw(a - b)
+end
+local function sgn(v) if v >= 0 then return 1 end return -1 end
+
+-- ============================================================ Authentic 16x16 Neverlose RGBA Icons
+local ICONS = {}
+do
+  local function buildIcon(rows)
+    local t = {}
+    for y = 1, 16 do
+      local line = rows[y] or '................'
+      for x = 1, 16 do
+        local ch = line:sub(x, x)
+        if ch == '#' then t[#t + 1] = '\255\255\255\255'
+        elseif ch == '+' then t[#t + 1] = '\255\255\255\135'
+        else t[#t + 1] = '\0\0\0\0' end
+      end
+    end
+    local ok, id = pcall(renderer.load_rgba, table.concat(t), 16, 16)
+    return ok and id or nil
+  end
+
+  ICONS.rage = buildIcon({
+    '.......##.......','.......##.......','....+######+....','...##+....+##...',
+    '..##........##..','..#....##....#..','.##...####...##.','####..####..####',
+    '####..####..####','.##...####...##.','..#....##....#..','..##........##..',
+    '...##+....+##...','....+######+....','.......##.......','.......##.......',
+  })
+  ICONS.aa = buildIcon({
+    '....+#..........','...###..........','..##########....','.############...',
+    '..####....####..','...+#.......###.','.............##.','.............##.',
+    '.............##.','............###.','..##.......###..','..####...####...',
+    '...#########....','....+#####+.....','................','................',
+  })
+  ICONS.mouse = buildIcon({
+    '.....######.....','...+###..###+...','...####..####...','...####..####...',
+    '...####..####...','...####..####...','...##########...','...##########...',
+    '...##########...','...##########...','...##########...','...+########+...',
+    '....########....','.....+####+.....','................','................',
+  })
+  ICONS.weapon = buildIcon({
+    '................','................','.##############.','.###############',
+    '.###############','.######..+#####.','.#####....+###..','..####+.........',
+    '..#####.........','...####.........','...####.........','....####........',
+    '....####........','................','................','................',
+  })
+  ICONS.players = buildIcon({
+    '................','.....+####+.....','....########....','....########....',
+    '....########....','.....+####+.....','.......##.......','....########....',
+    '..############..','.##############.','.##############.','.##############.',
+    '................','................','................','................',
+  })
+  ICONS.gear = buildIcon({
+    '......####......','......####......','..##..####..##..','.##############.',
+    '..############..','...###....###...','#####......#####','#####......#####',
+    '...###....###...','..############..','.##############.','..##..####..##..',
+    '......####......','......####......','................','................',
+  })
+  ICONS.save = buildIcon({
+    '................','.###########+...','.###.....#####..','.###.....######.',
+    '.###.....######.','.##############.','.##############.','.###........###.',
+    '.###........###.','.###........###.','.###........###.','.##############.',
+    '................','................','................','................',
+  })
+  ICONS.search = buildIcon({
+    '................','....+######+....','...##########...','..###+....+###..',
+    '..##........##..','..##........##..','..##........##..','..###+....+###..',
+    '...##########...','....+######+###.','..........#####.','...........#####',
+    '............###.','................','................','................',
+  })
+end
+
+local function drawIcon(id, x, y, sz, r, g, b, a)
+  if id then
+    renderer.texture(id, x, y, sz, sz, r, g, b, a or 255)
+  else
+    renderer.rounded_rectangle(x + 2, y + 2, sz - 4, sz - 4, r, g, b, a or 255, 2)
+  end
+end
+
+-- ============================================================ virtual UI layer
+local ui = setmetatable({}, {__index = nui})
+local UIX = {VC = {}, HK = {}, dirty = false, focus = nil, listen = nil}
+
+do
+  local VC, HK = UIX.VC, UIX.HK
+  local VKN = {SPACE = 0x20, TAB = 0x09, SHIFT = 0x10, CTRL = 0x11, ALT = 0x12, CAPS = 0x14,
+    LEFT = 0x25, UP = 0x26, RIGHT = 0x27, DOWN = 0x28, INS = 0x2D, DEL = 0x2E, HOME = 0x24,
+    END = 0x23, PGUP = 0x21, PGDN = 0x22, M3 = 0x04, M4 = 0x05, M5 = 0x06,
+    MOUSE4 = 0x05, MOUSE5 = 0x06}
+  for i = 0, 25 do VKN[string.char(65 + i)] = 65 + i end
+  for i = 0, 9 do VKN[tostring(i)] = 48 + i; VKN['N' .. i] = 0x60 + i end
+  for i = 1, 12 do VKN['F' .. i] = 0x6F + i end
+
+  local VKR = {}
+  for name, vk in pairs(VKN) do
+    if not VKR[vk] or #name < #VKR[vk] then VKR[vk] = name end
+  end
+  VKR[0xC0] = '~'; VKR[0xBA] = ';'; VKR[0xBB] = '='; VKR[0xBC] = ','; VKR[0xBD] = '-'
+  VKR[0xBE] = '.'; VKR[0xBF] = '/'; VKR[0xDB] = '['; VKR[0xDC] = '\\'; VKR[0xDD] = ']'; VKR[0xDE] = "'"
+
+  function UIX.keyToVk(k)
+    if type(k) == 'number' then return k end
+    if type(k) ~= 'string' or k == '' or k:lower() == 'none' then return 0 end
+    return VKN[k:upper()] or 0
+  end
+  function UIX.vkName(vk)
+    if not vk or vk == 0 then return 'None' end
+    return VKR[vk] or string.format('0x%02X', vk)
+  end
+
+  function UIX.isKeyDown(vk)
+    if not vk or vk == 0 then return false end
+    local ok, v = pcall(client.key_state, vk)
+    if ok and v == true then return true end
+    local name = VKR[vk]
+    if name then
+      local ok2, v2 = pcall(client.key_state, name)
+      if ok2 and v2 == true then return true end
+      if name == 'M4' then
+        local ok3, v3 = pcall(client.key_state, 'Mouse4')
+        if ok3 and v3 == true then return true end
+      elseif name == 'M5' then
+        local ok3, v3 = pcall(client.key_state, 'Mouse5')
+        if ok3 and v3 == true then return true end
+      end
+    end
+    return false
+  end
+
+  local function ctl(kind, label, t)
+    t.kind, t.label, t.vis, t.group, t.__vc = kind, label, true, 'Misc', true
+    VC[#VC + 1] = t
+    return t
+  end
+
+  function ui.new_checkbox(label) return ctl('check', label, {val = false}) end
+  function ui.new_slider(label, mn, mx, def, unit)
+    return ctl('slider', label, {min = mn, max = mx, val = clamp(def or mn, mn, mx), unit = unit or ''})
+  end
+  function ui.new_combobox(label, opts) return ctl('combo', label, {opts = opts, val = 1}) end
+  function ui.new_multiselect(label, opts)
+    local v = {}
+    for i = 1, #opts do v[i] = false end
+    return ctl('multi', label, {opts = opts, val = v})
+  end
+  function ui.new_textbox(label, def) return ctl('text', label, {val = def or ''}) end
+  function ui.new_color_picker(label, r, g, b, a)
+    return ctl('color', label, {val = {r or 0, g or 175, b or 255, a or 255}})
+  end
+  function ui.new_hotkey(label, key, mode)
+    if mode ~= 'Toggle' and mode ~= 'Always' then mode = 'Hold' end
+    local c = ctl('hotkey', label, {vk = UIX.keyToVk(key), mode = mode, active = (mode == 'Always'), prev = false})
+    HK[#HK + 1] = c
+    return c
+  end
+
+  function ui.get(h)
+    if type(h) == 'table' and h.__vc then
+      local k = h.kind
+      if k == 'color' then return h.val[1], h.val[2], h.val[3], h.val[4] end
+      if k == 'hotkey' then return h.active end
+      return h.val
+    end
+    return nui.get(h)
+  end
+
+  function ui.set(h, a, b, c2, d)
+    if type(h) == 'table' and h.__vc then
+      local k = h.kind
+      if k == 'check' then h.val = a and true or false
+      elseif k == 'slider' then h.val = clamp(tonumber(a) or h.val, h.min, h.max)
+      elseif k == 'combo' then h.val = clamp(math.floor(tonumber(a) or 1), 1, #h.opts)
+      elseif k == 'multi' then
+        local v = {}
+        for i = 1, #h.opts do v[i] = (type(a) == 'table' and a[i]) and true or false end
+        h.val = v
+      elseif k == 'text' then h.val = tostring(a or '')
+      elseif k == 'color' then h.val = {a or 0, b or 175, c2 or 255, d or 255}
+      elseif k == 'hotkey' then
+        if type(a) == 'string' or type(a) == 'number' then
+          h.vk = UIX.keyToVk(a)
+          if b == 'Hold' or b == 'Toggle' or b == 'Always' then h.mode = b end
+        elseif type(a) == 'boolean' then
+          h.active = a
+        end
+      end
+      UIX.dirty = true
+      return
+    end
+    return nui.set(h, a, b, c2, d)
+  end
+
+  function ui.set_visible(h, v)
+    if type(h) == 'table' and h.__vc then h.vis = v and true or false; return end
+    return nui.set_visible(h, v)
+  end
+  function ui.set_group(h, g)
+    if type(h) == 'table' and h.__vc then h.group = g; return end
+  end
+  function ui.set_callback(h, fn)
+    if type(h) == 'table' and h.__vc then h.cb = fn; return end
+    return nui.set_callback(h, fn)
+  end
+
+  function UIX.poll()
+    if UIX.focus or UIX.listen then return end
+    for _, c in ipairs(HK) do
+      local down = UIX.isKeyDown(c.vk)
+      if c.mode == 'Always' then c.active = true
+      elseif c.mode == 'Toggle' then
+        if down and not c.prev then c.active = not c.active end
+      else c.active = down end
+      c.prev = down
+    end
+  end
+end
+
+local function grp(g, ...)
+  for _, id in ipairs({...}) do ui.set_group(id, g) end
+end
+
+local ST_NAMES = {'Shared', 'Standing', 'Moving', 'Air', 'Duck'}
+local MODS     = {'Off (Static)', 'Center jitter', 'Offset jitter', 'Random', 'Spin', '3-way', '5-way', 'Sway', 'Asymmetric Tank'}
+local DMODES   = {'Static', 'Jitter', 'Random', 'Opposite jitter', 'Sway', 'Asymmetric 58/32'}
+local SIDES    = {'Left', 'Right'}
+local PITCHES  = {'Off', 'Down', 'Up', 'Zero', 'Jitter', 'Random'}
+
+-- ============================================================ AA presets
+local function mk(yaw, mod, range, speed, dmode, side, amount, pitch)
+  return {override = true, yaw = yaw, mod = mod, range = range, speed = speed,
+          dmode = dmode, side = side, amount = amount, pitch = pitch}
+end
+
+local AAP = {
+  {name = 'Custom (manual)'},
+  {name = 'Full Static + Hit-Swap 58', s = {
+    mk(180, 1, 0, 40, 1, 1, 58, 2), mk(180, 1, 0, 40, 1, 1, 58, 2),
+    mk(180, 1, 0, 40, 1, 2, 58, 2), mk(180, 1, 0, 40, 1, 1, 58, 2),
+    mk(180, 1, 0, 40, 1, 2, 58, 2)}},
+  {name = 'Godmode Static-Shift', s = {
+    mk(180, 3, 16, 40, 1, 1, 58, 2), mk(180, 3, 14, 40, 1, 1, 58, 2),
+    mk(180, 3, 18, 45, 1, 2, 58, 2), mk(180, 2, 38, 50, 4, 1, 58, 2),
+    mk(180, 3, 14, 40, 1, 2, 54, 2)}},
+  {name = 'Asymmetric Tank', s = {
+    mk(180, 9, 32, 45, 6, 1, 58, 2), mk(180, 9, 30, 45, 6, 1, 58, 2),
+    mk(180, 9, 28, 50, 6, 2, 58, 2), mk(180, 2, 54, 60, 4, 1, 58, 2),
+    mk(180, 9, 26, 40, 6, 2, 54, 2)}},
+  {name = 'Meta center jitter 58', s = {
+    mk(180, 2, 58, 40, 4, 1, 58, 2), mk(180, 2, 62, 40, 4, 1, 58, 2),
+    mk(180, 2, 42, 40, 4, 1, 58, 2), mk(180, 4, 80, 40, 3, 1, 58, 2),
+    mk(180, 2, 50, 40, 4, 1, 58, 2)}},
+  {name = 'Anti-brute 5-way', s = {
+    mk(180, 7, 86, 40, 6, 1, 58, 2), mk(180, 7, 92, 40, 6, 1, 58, 2),
+    mk(180, 6, 64, 40, 4, 1, 58, 2), mk(180, 4, 110, 40, 3, 1, 58, 2),
+    mk(180, 7, 68, 40, 6, 2, 58, 2)}},
+}
+
+local aa = {}
+for i = 1, 5 do
+  aa[i] = {}
+  for k, v in pairs(AAP[2].s[i]) do aa[i][k] = v end
+end
+local function persist() UIX.dirty = true end
+
+-- ============================================================ UI: Anti-aim
+local E = {}
+E.aa = ui.new_checkbox('Enabled')
+local aaNames = {}
+for i, p in ipairs(AAP) do aaNames[i] = p.name end
+local PA  = ui.new_combobox('Preset', aaNames)
+local sel = ui.new_combobox('Condition', ST_NAMES)
+E.base = ui.new_combobox('Yaw base', {'Backward', 'At target'})
+E.djit = ui.new_slider('Randomize', 0, 30, 0, ' deg')
+ui.set(E.aa, true); ui.set(PA, 2); ui.set(E.base, 2); ui.set(E.djit, 0)
+
+local C = {}
+C.override = ui.new_checkbox('Override shared')
+C.pitch    = ui.new_combobox('Pitch', PITCHES)
+C.yaw      = ui.new_slider('Yaw offset', -180, 180, 180, ' deg')
+C.mod      = ui.new_combobox('Jitter mode', MODS)
+C.range    = ui.new_slider('Jitter range', 0, 180, 0, ' deg')
+C.speed    = ui.new_slider('Spin / sway speed', 1, 100, 40, '/s')
+C.dmode    = ui.new_combobox('Mode', DMODES)
+C.side     = ui.new_combobox('Side', SIDES)
+C.amount   = ui.new_slider('Body yaw', 0, 58, 58, ' deg')
+for _, ctl in pairs(C) do ctl.nocfg = true end
+
+grp('Main AA', E.aa, PA, sel, C.override, C.pitch, E.base, C.yaw)
+grp('Modifiers', C.mod, C.range, C.speed)
+grp('Desync', C.dmode, C.side, C.amount, E.djit)
+
+local K = {}
+K.inv     = ui.new_hotkey('Inverter', 'V', 'Toggle')
+K.L       = ui.new_hotkey('Manual left', 'Z', 'Hold')
+K.R       = ui.new_hotkey('Manual right', 'C', 'Hold')
+K.B       = ui.new_hotkey('Manual back', 'X', 'Hold')
+K.swapHit = ui.new_checkbox('Swap side on hit')
+K.ab      = ui.new_checkbox('Anti-bruteforce')
+ui.set(K.swapHit, true); ui.set(K.ab, true)
+grp('Binds & reactive', K.inv, K.L, K.R, K.B, K.swapHit, K.ab)
+
+local FL = {}
+FL.on  = ui.new_checkbox('Enabled')
+FL.max = ui.new_slider('Limit', 1, 14, 10, ' ticks')
+FL.var = ui.new_slider('Variance', 0, 6, 2, ' ticks')
+ui.set(FL.on, true)
+grp('Fake lag', FL.on, FL.max, FL.var)
+local function refreshFlVis()
+  local on = ui.get(FL.on)
+  ui.set_visible(FL.max, on); ui.set_visible(FL.var, on)
+end
+ui.set_callback(FL.on, refreshFlVis)
+refreshFlVis()
+
+local RR = {}
+RR.on   = ui.new_checkbox('Shift angle every round')
+RR.yaw  = ui.new_slider('Yaw shift range', 0, 35, 12, ' deg')
+RR.side = ui.new_checkbox('Invert side & body yaw')
+RR.mod  = ui.new_checkbox('Switch jitter modifier')
+ui.set(RR.on, true); ui.set(RR.side, true); ui.set(RR.mod, false)
+grp('Anti-resolver', RR.on, RR.yaw, RR.side, RR.mod)
+
+-- ============================================================ UI: Defensive / Exploits
+local D = {}
+D.on     = ui.new_checkbox('Defensive AA')
+D.dtOnly = ui.new_checkbox('Only with active DT')
+D.where  = ui.new_combobox('State', {'Air only', 'Air + Moving', 'Always'})
+D.pitch  = ui.new_slider('Pitch', -89, 89, -89, ' deg')
+D.yaw    = ui.new_slider('Yaw', -180, 180, 135, ' deg')
+D.sens   = ui.new_slider('Chaos', 0, 100, 65, '%')
+D.pat    = ui.new_combobox('Pattern', {'Choke cycle', 'Fast 4/2', 'Normal 8/3', 'Random'})
+D.os     = ui.new_checkbox('Prevent OS')
+ui.set(D.on, true); ui.set(D.dtOnly, true); ui.set(D.where, 3); ui.set(D.pat, 1)
+
+D.tp      = ui.new_checkbox('Auto teleport in air')
+D.tpTrig  = ui.new_combobox('Trigger', {'Timer', 'Enemy sees me', 'Both'})
+D.tpd     = ui.new_slider('Delay', 0, 500, 60, ' ms')
+D.tpcd    = ui.new_slider('Cooldown', 100, 2000, 350, ' ms')
+D.tpChoke = ui.new_slider('Burst ticks', 2, 14, 12, ' ticks')
+ui.set(D.tp, false); ui.set(D.tpTrig, 2)
+
+grp('Defensive', D.on, D.dtOnly, D.where, D.pitch, D.yaw, D.sens, D.pat, D.os)
+grp('Teleport', D.tp, D.tpTrig, D.tpd, D.tpcd, D.tpChoke)
+
+local function refreshDefVis()
+  local on = ui.get(D.on)
+  for _, id in ipairs({D.dtOnly, D.where, D.pitch, D.yaw, D.sens, D.pat}) do ui.set_visible(id, on) end
+  local tpOnVis = ui.get(D.tp)
+  for _, id in ipairs({D.tpTrig, D.tpd, D.tpcd, D.tpChoke}) do ui.set_visible(id, tpOnVis) end
+end
+ui.set_callback(D.on, refreshDefVis)
+ui.set_callback(D.tp, refreshDefVis)
+refreshDefVis()
+
+-- ============================================================ AA control sync & Anti-resolver reroll
+local function curState() return clamp(ui.get(sel) or 1, 1, 5) end
+
+local function loadState(i)
+  local c = aa[i]
+  ui.set(C.override, c.override); ui.set(C.yaw, c.yaw); ui.set(C.mod, c.mod)
+  ui.set(C.range, c.range); ui.set(C.speed, c.speed); ui.set(C.dmode, c.dmode)
+  ui.set(C.side, c.side); ui.set(C.amount, c.amount); ui.set(C.pitch, c.pitch)
+end
+
+local function refreshAAVis()
+  local on = ui.get(E.aa)
+  local i = curState()
+  local c = aa[i]
+  local show = on and (i == 1 or c.override)
+  ui.set_visible(PA, on); ui.set_visible(sel, on); ui.set_visible(C.override, on and i ~= 1)
+  ui.set_visible(C.yaw, show); ui.set_visible(C.mod, show); ui.set_visible(C.range, show)
+  ui.set_visible(C.speed, show); ui.set_visible(C.dmode, show); ui.set_visible(C.side, show)
+  ui.set_visible(C.amount, show); ui.set_visible(C.pitch, show)
+end
+
+for field, ctl in pairs(C) do
+  ui.set_callback(ctl, function()
+    aa[curState()][field] = ui.get(ctl)
+    persist(); refreshAAVis()
+  end)
+end
+ui.set_callback(sel, function() loadState(curState()); refreshAAVis() end)
+ui.set_callback(E.aa, refreshAAVis)
+ui.set_callback(PA, function()
+  local p = AAP[ui.get(PA)]
+  if p and p.s then
+    for i = 1, 5 do
+      aa[i] = {}
+      for k, v in pairs(p.s[i]) do aa[i][k] = v end
+    end
+    if ui.get(PA) == 2 then ui.set(E.djit, 0) end
+    persist(); loadState(curState()); refreshAAVis()
+  end
+end)
+loadState(1); refreshAAVis()
+
+local SAFE_MODS = {2, 3, 6, 7, 8, 9}
+local function rerollRound()
+  if not ui.get(RR.on) then return end
+  local rng = ui.get(RR.yaw)
+  local isStaticPreset = (ui.get(PA) == 2)
+  for i = 1, 5 do
+    local c = aa[i]
+    if isStaticPreset then
+      c.yaw = nyaw(180 + (math.random() * 2 - 1) * math.min(rng, 10))
+      if ui.get(RR.side) then c.side = math.random(1, 2); c.amount = 58; c.dmode = 1 end
+    else
+      c.yaw = nyaw(180 + (math.random() * 2 - 1) * rng)
+      if ui.get(RR.side) then c.side = math.random(1, 2); c.amount = math.random(48, 58) end
+      if ui.get(RR.mod) then c.mod = SAFE_MODS[math.random(1, #SAFE_MODS)]; c.range = math.random(28, 64) end
+    end
+  end
+  loadState(curState()); refreshAAVis(); UIX.dirty = true
+end
+
+-- ============================================================ UI: Resolver
+local HYPN = {'EDGE/AUTO', 'SIDE FULL', 'OPP FULL', 'HALF SIDE', 'HALF OPP', 'JITTER CTR', 'FEET', 'TICK SPLIT'}
+local RP = ui.new_combobox('Preset', {'Custom', 'Meta Hybrid (Best)', 'Static Destroyer',
+  'Jitter Hunter', 'Aggressive Brute', 'Body-aim Heavy'})
+local RC = {}
+RC.enabled = ui.new_checkbox('Enabled')
+RC.mode    = ui.new_combobox('Mode', {'Adaptive Hybrid', 'Static focus', 'Jitter focus', 'Manual side'})
+RC.side    = ui.new_combobox('Manual side', SIDES)
+RC.hyp     = ui.new_multiselect('Hypotheses', {'Wall/Edge Freestand', 'Full (predicted)', 'Full (opposite)',
+                                               'Half (predicted)', 'Half (opposite)', 'Jitter Center', 'Public feet', 'Tick split'})
+RC.auto    = ui.new_checkbox('Auto meta (learn)')
+RC.scale   = ui.new_slider('Desync scale', 40, 100, 100, '%')
+RC.thresh  = ui.new_slider('Switch after', 1, 4, 1, ' miss')
+RC.lock    = ui.new_checkbox('Lock angle on hit')
+RC.air     = ui.new_combobox('Air targets', {'Same logic', 'Center / Jitter', 'Public feet'})
+RC.body    = ui.new_slider('Baim after', 0, 6, 2, ' miss')
+ui.set(RP, 2); ui.set(RC.enabled, true)
+ui.set(RC.hyp, {true, true, true, true, true, true, true, true})
+ui.set(RC.auto, true); ui.set(RC.lock, true)
+grp('Resolver', RP, RC.enabled, RC.mode, RC.side, RC.hyp, RC.auto, RC.scale, RC.thresh, RC.lock, RC.air, RC.body)
+
+local hypStat = {}
+for h = 1, 8 do hypStat[h] = {hit = 0, miss = 0} end
+
+local R = {orders = {}, memory = 60}
+local BASE_ORDERS = {
+  {1, 3, 2, 6, 4, 5, 8, 7},
+  {2, 3, 1, 4, 5, 6, 7, 8},
+  {6, 8, 2, 3, 1, 4, 5, 7},
+}
+local function hypRate(h)
+  local s = hypStat[h]
+  return (s.hit + 1) / (s.hit + s.miss + 2)
+end
+local function updateRes()
+  R.enabled = ui.get(RC.enabled); R.mode = ui.get(RC.mode)
+  R.side = (ui.get(RC.side) == 1) and 1 or -1; R.auto = ui.get(RC.auto)
+  R.scale = ui.get(RC.scale) / 100; R.thresh = ui.get(RC.thresh)
+  R.lock = ui.get(RC.lock); R.air = ui.get(RC.air); R.body = ui.get(RC.body)
+  local mask = ui.get(RC.hyp)
+  for m = 1, 3 do
+    local o = {}
+    for _, h in ipairs(BASE_ORDERS[m]) do if mask[h] then o[#o + 1] = h end end
+    if R.auto then
+      for i = 2, #o do
+        local v = o[i]; local j = i - 1
+        while j >= 1 and hypRate(o[j]) < hypRate(v) - 0.03 do o[j + 1] = o[j]; j = j - 1 end
+        o[j + 1] = v
+      end
+    end
+    R.orders[m] = o
+  end
+  R.orders[4] = {2}
+end
+
+local function refreshResVis()
+  local on = ui.get(RC.enabled); local mode = ui.get(RC.mode)
+  for name, id in pairs(RC) do if name ~= 'enabled' then ui.set_visible(id, on) end end
+  ui.set_visible(RC.side, on and mode == 4); ui.set_visible(RC.hyp, on and mode ~= 4)
+  ui.set_visible(RC.thresh, on and mode ~= 4); ui.set_visible(RC.auto, on and mode ~= 4)
+end
+for _, id in pairs(RC) do ui.set_callback(id, function() updateRes(); refreshResVis() end) end
+
+local RPRESETS = {
+  nil,
+  {mode = 1, thresh = 1, lock = true, air = 2, body = 2, scale = 100, auto = true, hyp = {true, true, true, true, true, true, true, true}},
+  {mode = 2, thresh = 1, lock = true, air = 1, body = 2, scale = 100, auto = false, hyp = {true, true, true, true, true, false, false, false}},
+  {mode = 3, thresh = 1, lock = false, air = 2, body = 1, scale = 95, auto = true, hyp = {true, true, true, false, false, true, false, true}},
+  {mode = 1, thresh = 1, lock = true, air = 2, body = 2, scale = 100, auto = true, hyp = {true, true, true, true, true, true, false, true}},
+  {mode = 1, thresh = 1, lock = true, air = 2, body = 1, scale = 90, auto = true, hyp = {true, true, true, false, false, true, false, false}},
+}
+ui.set_callback(RP, function()
+  local p = RPRESETS[ui.get(RP)]
+  if not p then return end
+  ui.set(RC.mode, p.mode); ui.set(RC.thresh, p.thresh); ui.set(RC.lock, p.lock)
+  ui.set(RC.air, p.air); ui.set(RC.body, p.body); ui.set(RC.scale, p.scale)
+  ui.set(RC.auto, p.auto); ui.set(RC.hyp, p.hyp)
+  updateRes(); refreshResVis()
+end)
+updateRes(); refreshResVis()
+
+-- ============================================================ UI: Ragebot tweaks, Lethal Scout, Smart Peek, Visuals
+local X = {}
+X.dmgKey     = ui.new_hotkey('Min dmg override', 'N', 'Toggle')
+X.dmgVal     = ui.new_slider('Override dmg', 1, 130, 10, ' hp')
+X.autoLethal = ui.new_checkbox('Auto lethal body (Scout)')
+X.lowHp      = ui.new_slider('Lethal threshold', 10, 100, 79, ' hp')
+X.bt         = ui.new_combobox('Backtrack', {'Default', 'Extended Max', 'Ideal + OnShot'})
+X.pts        = ui.new_combobox('Point profile', {'Off', 'Adaptive Lethal', 'Head focus', 'Body focus', 'Safe-first'})
+ui.set(X.autoLethal, true); ui.set(X.lowHp, 79); ui.set(X.bt, 3); ui.set(X.pts, 2)
+grp('Ragebot', X.dmgKey, X.dmgVal, X.autoLethal, X.lowHp, X.bt, X.pts)
+local function refreshLowVis() ui.set_visible(X.lowHp, ui.get(X.autoLethal)) end
+ui.set_callback(X.autoLethal, refreshLowVis); refreshLowVis()
+
+local P = {}
+local HB = {'Head', 'Chest', 'Pelvis', 'Arms', 'Legs', 'Feet'}
+P.on    = ui.new_checkbox('Override points')
+P.hit   = ui.new_multiselect('Hitboxes', HB)
+P.mp    = ui.new_multiselect('Multipoint', HB)
+P.hs    = ui.new_slider('Head scale', 0, 100, 65, '%')
+P.bs    = ui.new_slider('Body scale', 0, 100, 75, '%')
+P.hc    = ui.new_slider('Hit chance', 0, 100, 0, '%')
+P.stop  = ui.new_checkbox('Auto stop')
+P.scope = ui.new_checkbox('Auto scope')
+ui.set(P.hit, {true, true, true, false, false, false})
+ui.set(P.mp, {true, true, true, false, false, false})
+grp('Points', P.on, P.hit, P.mp, P.hs, P.bs, P.hc, P.stop, P.scope)
+local function refreshPtsVis()
+  local on = ui.get(P.on)
+  for _, id in ipairs({P.hit, P.mp, P.hs, P.bs, P.hc, P.stop, P.scope}) do ui.set_visible(id, on) end
+end
+ui.set_callback(P.on, refreshPtsVis); refreshPtsVis()
+
+X.peek  = ui.new_hotkey('Smart peek key', 'F', 'Hold')
+X.pkret = ui.new_combobox('Return trigger', {'After shot', 'On release', 'Both'})
+X.pkdt  = ui.new_checkbox('Auto DT while peeking')
+X.pkspd = ui.new_slider('Return speed', 50, 100, 100, '%')
+ui.set(X.pkret, 3); ui.set(X.pkdt, false)
+grp('Smart peek', X.peek, X.pkret, X.pkdt, X.pkspd)
+
+local KS = {}
+KS.on   = ui.new_checkbox('Killsay (on-screen)')
+KS.text = ui.new_textbox('Messages ( | = random)', 'anti-neverlose on top | {name} got owned | 1 :)')
+grp('Killsay', KS.on, KS.text)
+
+local V = {}
+V.ind      = ui.new_checkbox('Crosshair indicators')
+V.log      = ui.new_checkbox('Hitlog')
+V.tracer   = ui.new_checkbox('3D tracers')
+V.restag   = ui.new_checkbox('Resolver tags on players')
+V.dbg      = ui.new_checkbox('Resolver debug ESP')
+V.kill     = ui.new_checkbox('Kill streak popups')
+V.rpanel   = ui.new_checkbox('Resolver panel (HUD)')
+V.rpcorner = ui.new_combobox('Panel corner', {'Top Left', 'Top Right', 'Bottom Left', 'Bottom Right'})
+V.accent   = ui.new_color_picker('Menu accent', 0, 175, 255, 255)
+for _, id in ipairs({V.ind, V.log, V.tracer, V.restag, V.dbg, V.kill, V.rpanel, KS.on}) do ui.set(id, true) end
+ui.set(V.rpcorner, 2)
+grp('Visuals', V.ind, V.log, V.tracer, V.restag, V.dbg, V.kill, V.rpanel, V.rpcorner, V.accent)
+
+-- ============================================================ Resolver & Target State
+local S, A = {}, {}
+local curOrigin, prevOrigin, fireTick, curHealth, lastHit = {}, {}, {}, {}, {}
+local totals = {hit = 0, miss = 0}
+local nearestEnemy, nearestSlot, crosshairSlot, lastEngagedSlot = nil, nil, nil, nil
+local exposed = true
+
+local function newState()
+  return {stage = 1, miss = 0, streak = 0, lock = nil, lockSide = nil, lockAt = 0, lastMiss = 0,
+          last = 1, lastAngle = 0, hits = 0, misses = 0, seq = {}, lastReason = nil, lastAt = 0}
+end
+local function pushSeq(st, ok)
+  local q = st.seq; q[#q + 1] = ok
+  if #q > 8 then table.remove(q, 1) end
+end
+local function getState(slot)
+  local st = S[slot]
+  if not st then st = newState(); S[slot] = st end
+  return st
+end
+local function clearOverride(slot) pcall(rage.reset_target_override, slot) end
+
+local function localPos()
+  local me = entity.get_local_player()
+  if not me then return nil end
+  local x, y, z = entity.get_origin(me)
+  if not x then return nil end
+  return vector.new(x, y, z)
+end
+
+local function isLocalOnGround()
+  local cond = antiaim and antiaim.get_condition and antiaim.get_condition()
+  if cond == 'in air' then return false end
+  local me = entity.get_local_player()
+  if me then
+    local e = entity.get(me)
+    if e and e.flags then return bit.band(e.flags, 1) ~= 0 end
+  end
+  local s = entity.get_local_state()
+  if s and s.move and s.move.onGround ~= nil then return s.move.onGround end
+  return true
+end
+
+client.set_event_callback('net_update_end', function()
+  local aliveSlots = {}
+  for _, slot in ipairs(entity.get_players(true)) do
+    local e = entity.get(slot)
+    if e and e.health and e.health > 0 and e.yaw then
+      aliveSlots[slot] = true
+      if curOrigin[slot] then prevOrigin[slot] = curOrigin[slot] end
+      curOrigin[slot] = e.origin; curHealth[slot] = e.health
+      if R.enabled then
+        local a = A[slot]
+        if not a then
+          a = {side = 1, edgeSide = nil, isStatic = true, isJitter = false, jitterRange = 0, air = false, choked = 0}
+          A[slot] = a
+        end
+        a.air = bit.band(e.flags or 1, 1) == 0
+        a.choked = e.choked or 0
+        local d = adiff(e.foot or e.yaw, e.yaw)
+        if math.abs(d) >= 1.5 then a.side = sgn(d) end
+
+        local okH, hist = pcall(entity.get_history, slot, 8)
+        if okH and type(hist) == 'table' and #hist >= 4 then
+          local altFlips, prevStep, sumAbsStep, steps = 0, 0, 0, 0
+          for i = 2, #hist do
+            local s1, s0 = hist[i], hist[i - 1]
+            if s1 and s0 and s1.yaw and s0.yaw then
+              local step = adiff(s1.yaw, s0.yaw)
+              if math.abs(step) > 16 and math.abs(prevStep) > 16 and (step * prevStep < 0) then
+                altFlips = altFlips + 1
+                sumAbsStep = sumAbsStep + math.abs(step)
+                steps = steps + 1
+              end
+              prevStep = step
+            end
+          end
+          a.isJitter = (altFlips >= 2)
+          a.isStatic = not a.isJitter
+          a.jitterRange = (steps > 0) and (sumAbsStep / steps) or 0
+        else
+          a.isStatic = true; a.isJitter = false
+        end
+      end
+    else
+      curOrigin[slot], curHealth[slot] = nil, nil
+    end
+  end
+  for slot in pairs(curHealth) do
+    if not aliveSlots[slot] then curHealth[slot], curOrigin[slot] = nil, nil end
+  end
+end)
+
+local function angleFor(h, t, md, p, delta, info)
+  if h == 1 then
+    local s = (info and info.edgeSide) or p
+    return nyaw(t.yaw + s * md)
+  elseif h == 2 then return nyaw(t.yaw + p * md)
+  elseif h == 3 then return nyaw(t.yaw - p * md)
+  elseif h == 4 then return nyaw(t.yaw + p * md * 0.55)
+  elseif h == 5 then return nyaw(t.yaw - p * md * 0.55)
+  elseif h == 6 then return t.yaw
+  elseif h == 7 then return t.foot_yaw end
+  local q = ((t.tick or 0) % 2 == 0) and 1 or -1
+  return nyaw(t.yaw + p * q * md)
+end
+
+client.set_event_callback('resolve', function(t)
+  if not R.enabled then return nil end
+  local st = getState(t.slot)
+  local info = A[t.slot]
+  local md = math.min((t.max_desync or 58) * R.scale, 58)
+  local delta = adiff(t.foot_yaw, t.yaw)
+
+  local p
+  if R.mode == 4 then p = R.side
+  elseif st.lock and st.lockSide and R.lock then p = st.lockSide
+  elseif info and info.edgeSide then p = info.edgeSide
+  elseif info and info.side then p = info.side
+  else p = (math.abs(delta) >= 1) and sgn(delta) or 1 end
+
+  local h
+  if info and info.air and R.air ~= 1 then
+    h = (R.air == 2) and 6 or 7
+  elseif st.lock and R.lock and R.mode ~= 4 then
+    h = st.lock
+  elseif R.mode == 1 and info then
+    if info.isStatic then
+      local staticOrder = {1, 3, 4, 5, 6, 7}
+      h = staticOrder[(st.stage - 1) % #staticOrder + 1]
+    elseif info.isJitter then
+      local jitterOrder = {6, 8, 2, 3, 4, 5}
+      h = jitterOrder[(st.stage - 1) % #jitterOrder + 1]
+    end
+  end
+
+  if not h then
+    local order = R.orders[R.mode]
+    local n = order and #order or 0
+    if n == 0 then return nil end
+    h = order[(st.stage - 1) % n + 1]
+  end
+
+  st.last = h; st.lastSide = p
+  local out = angleFor(h, t, md, p, delta, info)
+  st.lastAngle = adiff(out, t.yaw)
+  return out
+end)
+
+local function isResolverMiss(e)
+  local rs = (type(e.reason) == 'string') and e.reason:lower() or nil
+  if not rs then return true end
+  if rs:find('resolver', 1, true) or rs:find('unknown', 1, true) or rs:find('correction', 1, true) then return true end
+  if rs:find('spread', 1, true) or rs:find('occlusion', 1, true)
+    or rs:find('death', 1, true) or rs:find('predict', 1, true) then return false end
+  return true
+end
+
+-- ============================================================ Hitlog / Killsay / Resolver Feedback
+local rows = {}
+local LOG_LIFE = 6
+local function addRow(kind, text)
+  table.insert(rows, 1, {kind = kind, text = text, at = globals.realtime()})
+  if #rows > 6 then table.remove(rows) end
+end
+
+local abStage, abAt = 0, 0
+local abTrigger
+local hitSwapCount, hitSideFlip = 0, 1
+local ks = {text = nil, at = -100, lastFire = -100}
+local function pickKillsay(name)
+  local raw = ui.get(KS.text) or ''
+  local list = {}
+  for part in string.gmatch(raw, '[^|]+') do
+    local s = part:match('^%s*(.-)%s*$')
+    if s and #s > 0 then list[#list + 1] = s end
+  end
+  if #list == 0 then return nil end
+  local s = list[math.random(1, #list)]
+  return (s:gsub('{name}', name or 'enemy'))
+end
+
+local KILLWIN = 4
+local kstreak = {count = 0, multi = 0, multiAt = -100, popup = nil, popupAt = -100, popupColor = {255, 205, 100}}
+local MULTI_NAMES = {[2] = 'DOUBLE KILL', [3] = 'TRIPLE KILL', [4] = 'QUAD KILL', [5] = 'MONSTER KILL'}
+local STREAK_NAMES = {[3] = 'KILLING SPREE', [5] = 'RAMPAGE', [7] = 'DOMINATING', [10] = 'UNSTOPPABLE'}
+local function showPopup(text, color)
+  kstreak.popup, kstreak.popupAt, kstreak.popupColor = text, globals.realtime(), color
+end
+local function registerKill()
+  local now = globals.realtime()
+  kstreak.count = kstreak.count + 1
+  kstreak.multi = (now - kstreak.multiAt <= KILLWIN) and (kstreak.multi + 1) or 1
+  kstreak.multiAt = now
+  if kstreak.multi >= 2 then
+    showPopup(MULTI_NAMES[math.min(kstreak.multi, 5)], {255, 205, 100})
+  elseif STREAK_NAMES[kstreak.count] then
+    showPopup(STREAK_NAMES[kstreak.count], {255, 110, 120})
+  end
+end
+local function resetStreak() kstreak.count, kstreak.multi, kstreak.multiAt = 0, 0, -100 end
+
+local function doKillsay(slot, src)
+  registerKill()
+  if not ui.get(KS.on) then return end
+  local now = globals.realtime()
+  if now - ks.lastFire < 1 then return end
+  local txt = pickKillsay(entity.get_name(slot) or 'enemy')
+  if not txt then return end
+  ks.text, ks.at, ks.lastFire = txt, now, now
+end
+
+client.set_event_callback('aim_hit', function(e)
+  local slot = e.slot or e.target
+  totals.hit = totals.hit + 1
+  if slot then lastHit[slot] = globals.realtime(); lastEngagedSlot = slot end
+  local hypName = '-'
+  if R.enabled and slot then
+    local st = getState(slot)
+    st.hits = st.hits + 1; st.miss, st.streak = 0, 0
+    pushSeq(st, true); st.lastAt = globals.realtime()
+    if st.last and hypStat[st.last] then hypStat[st.last].hit = hypStat[st.last].hit + 1 end
+    if R.lock and R.mode ~= 4 then
+      st.lock = st.last; st.lockSide = st.lastSide; st.lockAt = globals.realtime()
+    end
+    clearOverride(slot)
+    hypName = HYPN[st.last] or '-'
+  end
+  if ui.get(V.log) then
+    local name = (slot and entity.get_name(slot)) or ('#' .. tostring(slot))
+    addRow('hit', string.format('HIT  %s  %d dmg  [%s]', name, math.floor(e.damage or 0), hypName))
+  end
+  if e.impact then
+    pcall(function()
+      local r, g, b = ui.get(V.accent)
+      renderer.effect('sphere', e.impact, {radius = 2.5, color = {r, g, b, 200}, life = 0.35, fade = 0.35, material = 'neon'})
+    end)
+  end
+end)
+
+client.set_event_callback('aim_miss', function(e)
+  local slot = e.slot or e.target
+  totals.miss = totals.miss + 1
+  if slot then lastEngagedSlot = slot end
+  local hypName, stageNo = '-', 0
+  if R.enabled and slot then
+    local st = getState(slot)
+    st.misses = st.misses + 1; pushSeq(st, false)
+    st.lastAt = globals.realtime()
+    st.lastReason = (type(e.reason) == 'string') and e.reason or nil
+    hypName, stageNo = HYPN[st.last] or '-', st.stage
+    if isResolverMiss(e) then
+      if st.last and hypStat[st.last] then hypStat[st.last].miss = hypStat[st.last].miss + 1 end
+      st.lock = nil; st.lockSide = nil
+      st.lastMiss = globals.realtime()
+      st.miss = st.miss + 1; st.streak = st.streak + 1
+      local info = A[slot]
+      if info and st.last == 1 then
+        if info.edgeSide then info.edgeSide = -info.edgeSide end
+        info.side = -info.side
+      end
+      if R.mode ~= 4 and st.miss >= R.thresh then
+        st.stage = st.stage + 1; st.miss = 0
+      end
+      if R.body > 0 and st.streak >= R.body then
+        pcall(rage.set_target_override, slot, {forceBody = true, bodyAim = 3})
+      end
+    end
+  end
+  if ui.get(V.log) then
+    local name = (slot and entity.get_name(slot)) or ('#' .. tostring(slot))
+    local reason = (type(e.reason) == 'string') and e.reason or 'resolver'
+    addRow('miss', string.format('MISS  %s  %s  [%s s%d]', name, reason, hypName, stageNo))
+  end
+end)
+
+client.set_event_callback('player_hurt', function(e)
+  local me = entity.get_local_player()
+  if ui.get(E.aa) and e.slot == me then
+    if ui.get(K.swapHit) then
+      hitSideFlip = -hitSideFlip; hitSwapCount = hitSwapCount + 1
+      for i = 1, 5 do aa[i].side = (aa[i].side == 1) and 2 or 1 end
+      loadState(curState())
+    elseif ui.get(K.ab) and abTrigger then
+      abTrigger()
+    end
+  end
+  if e.attacker == me and e.slot then
+    lastEngagedSlot = e.slot
+    if e.health then curHealth[e.slot] = e.health end
+    lastHit[e.slot] = globals.realtime()
+    if e.killed then curHealth[e.slot] = nil; doKillsay(e.slot, 'player_hurt') end
+  end
+  if e.slot == me and e.killed then resetStreak() end
+end)
+
+client.set_event_callback('player_death', function(e)
+  local slot = e and e.slot
+  if slot then curHealth[slot] = nil; clearOverride(slot) end
+  if slot and lastHit[slot] and globals.realtime() - lastHit[slot] < 0.6 then
+    doKillsay(slot, 'player_death')
+  end
+end)
+
+client.set_event_callback('weapon_fire', function(e)
+  local slot = e.slot or e.shooter
+  if slot and e.tick then fireTick[slot] = e.tick end
+end)
+
+client.set_event_callback('shot', function(e)
+  if not ui.get(V.tracer) or e.shooter ~= entity.get_local_player() then return end
+  local melee = bit.band(e.flags or 0, 8) ~= 0
+  local extra = (not melee) and bit.band(e.flags or 0, 32) ~= 0
+  if melee or extra or not e.start or not e.impact then return end
+  if (e.impact - e.start).Magnitude <= 0.001 then return end
+  local r, g, b, a = ui.get(V.accent)
+  renderer.tracer(e.start, e.impact, {color = {r, g, b, a}, width = 2, end_width = 0.5, life = 0.8, fade = 0.3, glow = 1})
+end)
+
+-- ============================================================ Native Setting Discovery & Safe DT Control
+local PK = {held = false, anchor = nil, returning = false, retAt = 0, dtOn = false}
+
+local SETTING_PREFIXES = {'Rage.', 'AA.', 'Visuals.', 'World.', 'Misc.', ''}
+local function listKeys(prefix)
+  local out = {}
+  local ok, list = pcall(nui.list_settings, prefix)
+  if ok and type(list) == 'table' then
+    for k, v in pairs(list) do
+      local key = nil
+      if type(v) == 'string' then key = v elseif type(k) == 'string' then key = k end
+      if key then out[#out + 1] = key end
+    end
+  end
+  return out
+end
+
+local function findAllKeys(patterns)
+  local hits, seen = {}, {}
+  for _, prefix in ipairs(SETTING_PREFIXES) do
+    for _, key in ipairs(listKeys(prefix)) do
+      if not seen[key] then
+        seen[key] = true
+        local l = key:lower()
+        for _, pat in ipairs(patterns) do
+          if l:find(pat, 1, true) then hits[#hits + 1] = key; break end
+        end
+      end
+    end
+  end
+  return hits
+end
+
+local tpHandles, dtHandles, btHandles, tagHandles = {}, {}, {}, {}
+local dtSavedState = {}
+local dtToggleTracker = {}
+
+local function discoverNativeHandles()
+  tpHandles, dtHandles, btHandles, tagHandles = {}, {}, {}, {}
+  for _, k in ipairs(findAllKeys({'teleport', 'airlag', 'air_lag'})) do
+    local ok, h = pcall(nui.reference, k)
+    if ok and h then tpHandles[#tpHandles + 1] = {h = h, k = k} end
+  end
+  for _, k in ipairs(findAllKeys({'doubletap', 'double_tap', 'double tap'})) do
+    local ok, h = pcall(nui.reference, k)
+    if ok and h then dtHandles[#dtHandles + 1] = {h = h, k = k} end
+  end
+  for _, k in ipairs(findAllKeys({'backtrack', 'back_track'})) do
+    local ok, h = pcall(nui.reference, k)
+    if ok and h then btHandles[#btHandles + 1] = {h = h, k = k} end
+  end
+  for _, k in ipairs(findAllKeys({'clantag', 'clan_tag', 'clan tag', 'tag'})) do
+    local ok, h = pcall(nui.reference, k)
+    if ok and h then tagHandles[#tagHandles + 1] = {h = h, k = k} end
+  end
+end
+discoverNativeHandles()
+
+local function isNativeDtActive()
+  if #dtHandles == 0 then return true end
+  local anyBoolTrue, hasHotkey, hotkeyActive = false, false, false
+  for _, item in ipairs(dtHandles) do
+    local ok, cur = pcall(nui.get, item.h)
+    if ok then
+      if type(cur) == 'boolean' then
+        if cur == true then anyBoolTrue = true end
+      elseif type(cur) == 'table' and cur.Mode then
+        hasHotkey = true
+        local m = cur.Mode
+        local vk = UIX.keyToVk(cur.Key or '')
+        local down = UIX.isKeyDown(vk)
+        local tr = dtToggleTracker[item.k] or {state = false, prev = false}
+        if down and not tr.prev then tr.state = not tr.state end
+        tr.prev = down; dtToggleTracker[item.k] = tr
+        if m == 'Always' then hotkeyActive = true
+        elseif m == 'Hold' and down then hotkeyActive = true
+        elseif m == 'Toggle' and tr.state then hotkeyActive = true end
+      end
+    end
+  end
+  if hasHotkey then return hotkeyActive and (anyBoolTrue or #dtHandles == 1) end
+  return anyBoolTrue
+end
+
+local function setNativeControl(list, wantBool, restoreSaved)
+  for _, item in ipairs(list) do
+    local h, k = item.h, item.k
+    local ok, cur = pcall(nui.get, h)
+    if ok then
+      if restoreSaved and dtSavedState[k] ~= nil then
+        pcall(nui.set, h, dtSavedState[k])
+        dtSavedState[k] = nil
+      else
+        if dtSavedState[k] == nil then
+          if type(cur) == 'table' then dtSavedState[k] = {Key = cur.Key, Mode = cur.Mode}
+          else dtSavedState[k] = cur end
+        end
+        if type(cur) == 'boolean' then pcall(nui.set, h, wantBool)
+        elseif type(cur) == 'table' and cur.Mode then
+          pcall(nui.set, h, {Key = cur.Key or 'None', Mode = wantBool and 'Always' or 'OffHotkey'})
+        end
+      end
+    end
+  end
+end
+
+local function enforceClanTag()
+  if #tagHandles == 0 then discoverNativeHandles() end
+  for _, item in ipairs(tagHandles) do
+    local h = item.h
+    local ok, cur = pcall(nui.get, h)
+    if ok then
+      if type(cur) == 'string' then
+        if cur ~= FORCED_TAG then pcall(nui.set, h, FORCED_TAG) end
+      elseif type(cur) == 'boolean' then
+        if cur ~= true then pcall(nui.set, h, true) end
+      elseif type(cur) == 'number' then
+        if cur < 2 then pcall(nui.set, h, 2) end
+      end
+    end
+  end
+end
+client.every(0.25, enforceClanTag)
+
+-- ============================================================ Auto Teleport in Air
+local airAt, tpFired, tpActive, tpLastAt = nil, false, false, -100
+local tpChoked, tpPhase = 0, 0
+
+local function tpWant(realState, now)
+  if not ui.get(D.tp) or realState ~= 4 then
+    if tpPhase ~= 0 then
+      setNativeControl(dtHandles, true, true)
+      setNativeControl(tpHandles, false, true)
+      tpPhase = 0
+    end
+    airAt, tpFired, tpActive = nil, false, false
+    return false
+  end
+  if not airAt then airAt = now; tpFired = false end
+  local trig = ui.get(D.tpTrig)
+  local seenEnough = (now - airAt) * 1000 >= ui.get(D.tpd)
+  local cdReady = (now - tpLastAt) * 1000 >= ui.get(D.tpcd)
+  local wantByTimer = (trig == 1 or trig == 3) and seenEnough and not tpFired and cdReady
+  local wantByVision = (trig == 2 or trig == 3) and seenEnough and exposed and cdReady
+  return wantByTimer or wantByVision
+end
+
+local function tpTick(realState)
+  local now = globals.realtime()
+  local want = tpWant(realState, now)
+  if not ui.get(D.tp) then return end
+  if PK.held or PK.returning then return end
+
+  if want and tpPhase == 0 then
+    tpPhase = 1; tpFired = true; tpLastAt = now; tpActive = true; tpChoked = 0
+    setNativeControl(dtHandles, false, false)
+    setNativeControl(tpHandles, true, false)
+  elseif tpPhase == 1 and (now - tpLastAt) >= 0.07 then
+    tpPhase = 2
+    setNativeControl(dtHandles, true, true)
+    setNativeControl(tpHandles, false, true)
+  elseif tpPhase == 2 and (now - tpLastAt) >= 0.22 then
+    tpPhase = 0; tpActive = false
+  end
+end
+
+-- ============================================================ Instant 1-Frame Screen-Space Movement Basis (Smart Peek)
+local moveBasis = {fx = 0, fz = 1, rx = 1, rz = 0, valid = false}
+
+local function updateMoveBasis()
+  local pos = localPos()
+  if not pos then return end
+  local cx, cy = renderer.world_to_screen(pos.X, pos.Y, pos.Z)
+  local x1, y1 = renderer.world_to_screen(pos.X + 24, pos.Y, pos.Z)
+  local x2, y2 = renderer.world_to_screen(pos.X, pos.Y, pos.Z + 24)
+  if cx and x1 and x2 then
+    local f_dx, f_dz = -(y1 - cy), -(y2 - cy)
+    local flen = math.sqrt(f_dx * f_dx + f_dz * f_dz)
+    local r_dx, r_dz = (x1 - cx), (x2 - cx)
+    local rlen = math.sqrt(r_dx * r_dx + r_dz * r_dz)
+    if flen > 0.1 and rlen > 0.1 then
+      moveBasis.fx, moveBasis.fz = f_dx / flen, f_dz / flen
+      moveBasis.rx, moveBasis.rz = r_dx / rlen, r_dz / rlen
+      moveBasis.valid = true
+      return
+    end
+  end
+  local _, yaw = client.camera_angles()
+  if camera and camera.get then
+    local ok, cam = pcall(camera.get)
+    if ok and cam and cam.yaw then yaw = cam.yaw end
+  end
+  local rad = math.rad(yaw or 0)
+  moveBasis.fx, moveBasis.fz = -math.sin(rad), -math.cos(rad)
+  moveBasis.rx, moveBasis.rz = math.cos(rad), -math.sin(rad)
+  moveBasis.valid = true
+end
+
+local function worldToYaw(dx, dz)
+  if camera and camera.get then
+    local ok, cam = pcall(camera.get)
+    if ok and cam and cam.position and cam.yaw then
+      local p = cam.position
+      local sw = client.screen_size()
+      local bestYaw, bestDist = cam.yaw, 1e9
+      for off = 0, 270, 90 do
+        local a = math.rad(cam.yaw + off)
+        local px = renderer.world_to_screen(p.X + math.cos(a) * 200, p.Y, p.Z + math.sin(a) * 200)
+        if px and math.abs(px - sw * 0.5) < bestDist then
+          bestDist = math.abs(px - sw * 0.5)
+          bestYaw = math.deg(atan2(dz, dx)) - off
+        end
+      end
+      return nyaw(bestYaw)
+    end
+  end
+  return nyaw(math.deg(atan2(dz, dx)))
+end
+
+client.set_event_callback('aim_fire', function()
+  local mode = ui.get(X.pkret)
+  if PK.held and PK.anchor and (mode == 1 or mode == 3) then
+    PK.returning, PK.retAt = true, globals.realtime()
+  end
+end)
+
+client.set_event_callback('shot', function(e)
+  if e.shooter ~= entity.get_local_player() then return end
+  local mode = ui.get(X.pkret)
+  if PK.held and PK.anchor and (mode == 1 or mode == 3) and bit.band(e.flags or 0, 8) == 0 then
+    PK.returning, PK.retAt = true, globals.realtime()
+  end
+end)
+
+client.set_event_callback('setup_command', function(cmd)
+  UIX.poll()
+  local held = ui.get(X.peek)
+  local now = globals.realtime()
+  local mode = ui.get(X.pkret)
+  local pos = localPos()
+
+  if held and not PK.held then
+    PK.held, PK.returning = true, false
+    if pos then PK.anchor = pos end
+  elseif held and PK.held and not PK.anchor and pos then
+    PK.anchor = pos
+  elseif (not held) and PK.held then
+    PK.held = false
+    if PK.anchor and pos and (mode == 2 or mode == 3) then
+      PK.returning, PK.retAt = true, now
+    else
+      PK.anchor = nil; PK.returning = false
+    end
+  end
+
+  if not (PK.returning and PK.anchor and pos) then return end
+
+  local dx, dz = PK.anchor.X - pos.X, PK.anchor.Z - pos.Z
+  local dist = math.sqrt(dx * dx + dz * dz)
+  if dist < 4.5 or (now - PK.retAt > 2.0) then
+    PK.returning = false
+    cmd.forwardmove = 0; cmd.sidemove = 0
+    if not PK.held then PK.anchor = nil end
+    return
+  end
+
+  local spd = (ui.get(X.pkspd) or 100) / 100
+  local scale = math.min(1, dist / 14) * 127 * spd
+  local fwd = (dx * moveBasis.fx + dz * moveBasis.fz) / dist
+  local str = (dx * moveBasis.rx + dz * moveBasis.rz) / dist
+  cmd.forwardmove = clamp(fwd * scale, -127, 127)
+  cmd.sidemove    = clamp(str * scale, -127, 127)
+end)
+
+local function peekTick()
+  if #dtHandles > 0 then
+    local want = ui.get(X.pkdt) and PK.held
+    if want and not PK.dtOn then
+      setNativeControl(dtHandles, true, false)
+      PK.dtOn = true
+    elseif (not want) and PK.dtOn then
+      setNativeControl(dtHandles, false, true)
+      PK.dtOn = false
+    end
+  end
+end
+
+-- ============================================================ Exposure + Edge Freestand Scanner
+client.every(0.08, function()
+  local me = entity.get_local_player()
+  if not me then return end
+  local ox, oy, oz = entity.get_origin(me)
+  if not ox then return end
+  local myEye = vector.new(ox, oy + 18, oz)
+  nearestEnemy, nearestSlot = nil, nil
+  local nd = 1e18
+  local sw, sh = client.screen_size()
+  local cx, cy, cd = sw / 2, sh / 2, 1e18
+  crosshairSlot = nil
+
+  for _, slot in ipairs(entity.get_players(true)) do
+    local o = curOrigin[slot]
+    if o and entity.is_alive(slot) then
+      local dd = (o.X - ox) ^ 2 + (o.Z - oz) ^ 2
+      if dd < nd then nd, nearestEnemy, nearestSlot = dd, o, slot end
+      local sx, sy = renderer.world_to_screen(o.X, o.Y + 20, o.Z)
+      if sx then
+        local sd = (sx - cx) ^ 2 + (sy - cy) ^ 2
+        if sd < cd then cd, crosshairSlot = sd, slot end
+      end
+    end
+  end
+  nearestSlot = crosshairSlot or nearestSlot
+
+  local any, seen, n = false, false, 0
+  for _, slot in ipairs(entity.get_players(true)) do
+    local o = curOrigin[slot]
+    if o and entity.is_alive(slot) then
+      any = true; n = n + 1
+      if n > 4 then break end
+      local enemyEye = vector.new(o.X, o.Y + 18, o.Z)
+      local tr = client.trace_line(enemyEye, myEye)
+      if not tr or not tr.hit or (tr.fraction or 0) >= 0.94 then seen = true end
+      local info = A[slot]
+      if info and slot == nearestSlot then
+        local dx, dz = ox - o.X, oz - o.Z
+        local len = math.sqrt(dx * dx + dz * dz)
+        if len > 1 then
+          local rx, rz = -dz / len, dx / len
+          local leftHead  = vector.new(o.X + rx * 18, o.Y + 18, o.Z + rz * 18)
+          local rightHead = vector.new(o.X - rx * 18, o.Y + 18, o.Z - rz * 18)
+          local trL = client.trace_line(myEye, leftHead)
+          local trR = client.trace_line(myEye, rightHead)
+          local lBlocked = trL and trL.hit and (trL.fraction or 1) < 0.92
+          local rBlocked = trR and trR.hit and (trR.fraction or 1) < 0.92
+          if lBlocked and not rBlocked then info.edgeSide = 1
+          elseif rBlocked and not lBlocked then info.edgeSide = -1
+          else info.edgeSide = nil end
+        end
+      end
+    end
+  end
+  exposed = (not any) or seen
+end)
+
+-- ============================================================ Ragebot Hooks
+local eff = {dmg = 0, hc = 0, bt = 1, at = -100, ovr = false, lethal = false}
+
+local function getTargetForLethal()
+  if nearestSlot and curHealth[nearestSlot] and curHealth[nearestSlot] > 0 then
+    return nearestSlot, curHealth[nearestSlot]
+  end
+  local bestSlot, bestHp = nil, nil
+  for slot, hp in pairs(curHealth) do
+    if hp and hp > 0 and (not bestHp or hp < bestHp) then bestSlot, bestHp = slot, hp end
+  end
+  return bestSlot, bestHp
+end
+
+client.set_event_callback('rage_config', function(c)
+  local ovr = ui.get(X.dmgKey)
+  if ovr then c.minDamage = ui.get(X.dmgVal) end
+
+  if ui.get(P.on) then
+    local hb, mp = ui.get(P.hit), ui.get(P.mp)
+    local anyHb = false
+    local hbo, mpo = {}, {}
+    for i = 1, 6 do
+      hbo[i] = hb[i] and true or false
+      mpo[i] = mp[i] and true or false
+      if hbo[i] then anyHb = true end
+    end
+    if anyHb then c.hitboxes, c.multipoint = hbo, mpo end
+    c.headScale, c.bodyScale = ui.get(P.hs), ui.get(P.bs)
+    local hcv = ui.get(P.hc)
+    if hcv > 0 then c.hitchance = hcv end
+    if ui.get(P.stop) then c.autoStop = true end
+    if ui.get(P.scope) then c.autoScope = true end
+  end
+
+  local pts = ui.get(X.pts)
+  if pts == 4 then c.body = 3 elseif pts == 5 then c.safe = 2 end
+
+  eff.lethal = false
+  if ui.get(X.autoLethal) then
+    local thresh = ui.get(X.lowHp)
+    local tSlot, tHp = getTargetForLethal()
+    if tSlot and tHp and tHp <= thresh then
+      eff.lethal = true
+      c.minDamage = clamp(tHp, 1, 100)
+      c.body = 3; c.safe = 2
+      c.hitboxes   = {false, true, true, false, false, false}
+      c.multipoint = {false, true, true, false, false, false}
+      pcall(rage.set_target_override, tSlot, {forceBody = true, bodyAim = 3})
+    elseif tSlot then
+      local st = S[tSlot]
+      if not (st and R.body > 0 and st.streak >= R.body) then clearOverride(tSlot) end
+    end
+  end
+
+  if ui.get(X.bt) >= 2 then c.backtrack = 3 end
+  eff.dmg, eff.hc, eff.bt = c.minDamage or 0, c.hitchance or 0, c.backtrack or 1
+  eff.ovr, eff.at = ovr, globals.realtime()
+end)
+
+client.set_event_callback('rage_record', function(r)
+  local btMode = ui.get(X.bt)
+  if btMode == 1 then return end
+  local score = 0
+  local cur = curOrigin[r.slot]
+  if cur and r.origin then
+    local shift = (r.origin - cur).Magnitude
+    if shift > 2 then score = score + math.min(shift * 6, 450) end
+  end
+  if btMode == 2 then
+    score = score + (r.backtrack or 0) * 18
+  elseif btMode == 3 then
+    local ft = fireTick[r.slot]
+    if ft and r.tick and math.abs(r.tick - ft) <= 2 then score = score + 10000 end
+  end
+  r.score = score
+end)
+
+local function isHead(p)
+  local hb = p.hitbox
+  if type(hb) == 'string' then return hb:lower():find('head', 1, true) ~= nil end
+  if type(p.group) == 'string' then return p.group:lower():find('head', 1, true) ~= nil end
+  return p.group == 1
+end
+
+client.set_event_callback('rage_point', function(p)
+  local hp = curHealth[p.slot]
+  local head = isHead(p)
+  local thresh = ui.get(X.lowHp)
+
+  if ui.get(X.autoLethal) and hp and hp > 0 then
+    if hp <= thresh or ((p.damage or 0) >= hp and not head) then
+      if head then p.skip = true; return
+      else p.score = 1500 + (p.damage or 0) * 2 + (p.center and 200 or 0) + (p.safe and 250 or 0); return end
+    end
+  end
+
+  local prof = ui.get(X.pts)
+  if prof == 1 then return end
+  local score = 0
+  local st = S[p.slot]
+  if prof == 2 then
+    if p.center then score = score + 80 end
+    score = score + (p.damage or 0) * 0.6
+    if hp and (p.damage or 0) >= hp then score = score + 600 end
+    local streak = st and st.streak or 0
+    if streak >= 1 and p.safe then score = score + 300 end
+    if streak >= 1 and not head then score = score + 220 end
+    if streak >= 2 and head then score = score - 400 end
+    local a = A[p.slot]
+    if a and a.air and p.safe then score = score + 150 end
+  elseif prof == 3 then
+    if head then score = score + 350 end
+  elseif prof == 4 then
+    if not head then score = score + 400 else p.skip = true; return end
+  elseif prof == 5 then
+    if p.safe then score = score + 450 end
+  end
+  p.score = score
+end)
+
+client.set_event_callback('rage_target', function(t)
+  local sc = (100 - (t.health or 100)) * 3
+  if ui.get(X.autoLethal) and t.health and t.health <= ui.get(X.lowHp) then sc = sc + 800 end
+  local st = S[t.slot]
+  if st then sc = sc + st.hits * 15 - st.misses * 5 end
+  t.score = sc
+end)
+
+local defActive = false
+client.set_event_callback('rage_fire', function(s)
+  if ui.get(D.os) and defActive then s.skip = true end
+end)
+
+-- ============================================================ Anti-Aim Runtime
+local manual = nil
+local prevKey = {L = false, R = false, B = false}
+local function pollManual()
+  for _, k in ipairs({'L', 'R', 'B'}) do
+    local v = ui.get(K[k])
+    if v and not prevKey[k] then
+      if manual == k then manual = nil else manual = k end
+    end
+    prevKey[k] = v
+  end
+end
+
+local function stateIndex()
+  if not isLocalOnGround() then return 4 end
+  local s = entity.get_local_state()
+  if s and s.move then
+    if (s.move.duckAmount or 0) > 0.5 then return 5 end
+    if s.move.velocity and s.move.velocity.Magnitude > 5 then return 3 end
+  end
+  local cond = antiaim and antiaim.get_condition and antiaim.get_condition()
+  if cond == 'moving' then return 3 end
+  return 2
+end
+
+local abFlipV, abYawV = 1, 0
+local AB_OPTS = {-18, -12, 12, 18}
+abTrigger = function()
+  local now = globals.realtime()
+  if now - abAt < 0.2 then return end
+  abAt = now; abStage = abStage + 1; abFlipV = -abFlipV
+  local y, guard = abYawV, 0
+  while y == abYawV and guard < 8 do
+    y = AB_OPTS[math.random(1, #AB_OPTS)]; guard = guard + 1
+  end
+  abYawV = y
+end
+
+client.set_event_callback('bullet_impact', function(e)
+  if not ui.get(E.aa) or not ui.get(K.ab) then return end
+  local me = entity.get_local_player()
+  if not me or e.shooter == me or not entity.is_enemy(e.shooter) then return end
+  if not e.start or not e.impact then return end
+  local ox, oy, oz = entity.get_origin(me)
+  if not ox then return end
+  local p = vector.new(ox, oy + 18, oz)
+  local ab = e.impact - e.start
+  local len2 = ab:Dot(ab)
+  if len2 < 0.001 then return end
+  local t = clamp((p - e.start):Dot(ab) / len2, 0, 1)
+  local closest = e.start + ab * t
+  if (p - closest).Magnitude < 55 then abTrigger() end
+end)
+
+local flChoked, flTarget = 0, nil
+local DEF_PAT = {{4, 2}, {8, 3}}
+local defStartPk, defNextPk = 0, 0
+local function isDefActive(pk, choked, pat)
+  if pat == 1 then return (choked == 0) or (pk % 3 == 0)
+  elseif pat == 2 or pat == 3 then
+    local t = DEF_PAT[pat - 1]
+    return pk % (t[1] + t[2]) < t[2]
+  end
+  if pk < defStartPk - 40 then defStartPk, defNextPk = 0, 0 end
+  if pk >= defNextPk then
+    defStartPk = pk + math.random(2, 8)
+    defNextPk = defStartPk + math.random(2, 4)
+  end
+  return pk >= defStartPk and pk < defNextPk
+end
+
+local lastAA = {state = 2, side = 1, amount = 58, manual = nil, def = false, dtActive = false}
+local prevPacket, rndYaw, rndSide, rndP = -1, 0, 1, 0
+
+client.set_event_callback('anti_aim', function(cmd)
+  UIX.poll()
+  if not ui.get(E.aa) then defActive = false; return end
+  pollManual()
+  local real = stateIndex()
+  local idx = real
+  local c = aa[idx]
+  if not c.override then idx = 1; c = aa[1] end
+
+  local pk = cmd.packet or 0
+  local choked = cmd.chokedcommands or 0
+  if pk ~= prevPacket then
+    prevPacket = pk
+    rndYaw = math.random() * 2 - 1
+    rndP = math.random() * 2 - 1
+    rndSide = (math.random(0, 1) == 0) and -1 or 1
+  end
+  local phase = (pk % 2 == 0) and 1 or -1
+  local now = globals.realtime()
+  local range, speed = c.range, c.speed
+
+  local off, dir = 0, phase
+  local mod = c.mod
+  if mod == 2 then off = phase * range * 0.5
+  elseif mod == 3 then off = (phase == 1) and range or -range * 0.25
+  elseif mod == 4 then off = rndYaw * range * 0.5; dir = sgn(rndYaw)
+  elseif mod == 5 then
+    local spin = (now * speed * 8) % 360
+    off = spin; dir = (spin < 180) and 1 or -1
+  elseif mod == 6 then
+    local v = (pk % 3) - 1; off = v * range * 0.5; if v ~= 0 then dir = v end
+  elseif mod == 7 then
+    local v = (pk % 5) - 2; off = v * range * 0.25; if v ~= 0 then dir = sgn(v) end
+  elseif mod == 8 then
+    local s = math.sin(now * speed * 0.15); off = s * range * 0.5; dir = sgn(s)
+  elseif mod == 9 then
+    off = (phase == 1) and (range * 0.45) or (-range * 0.18); dir = phase
+  end
+
+  local abOn = ui.get(K.ab)
+  local isPureStatic = (mod == 1 and c.dmode == 1)
+  local abYaw = (abOn and not isPureStatic) and abYawV or 0
+  local abFlip = abOn and abFlipV or 1
+
+  local yawOut
+  if manual then
+    if manual == 'L' then yawOut = 90
+    elseif manual == 'R' then yawOut = -90
+    else yawOut = 180 end
+  else
+    yawOut = c.yaw + off + abYaw
+  end
+
+  local baseYaw = cmd.view_yaw
+  if (not manual) and ui.get(E.base) == 2 and nearestEnemy then
+    local mp = localPos()
+    if mp then baseYaw = worldToYaw(nearestEnemy.X - mp.X, nearestEnemy.Z - mp.Z) end
+  end
+  cmd.yaw = nyaw(baseYaw + yawOut)
+
+  local p = c.pitch
+  if p == 2 then cmd.pitch = 89
+  elseif p == 3 then cmd.pitch = -89
+  elseif p == 4 then cmd.pitch = 0
+  elseif p == 5 then cmd.pitch = 89 * phase
+  elseif p == 6 then cmd.pitch = math.floor(rndYaw * 89) end
+
+  local dm = c.dmode
+  local side
+  if dm == 2 then side = phase
+  elseif dm == 3 then side = rndSide
+  elseif dm == 4 then side = -dir
+  elseif dm == 6 then
+    side = (c.side == 1) and 1 or -1
+    if pk % 3 == 0 then side = -side end
+  else side = (c.side == 1) and 1 or -1 end
+
+  local amt = c.amount
+  if dm == 5 then amt = amt * (0.6 + 0.4 * (math.sin(now * speed * 0.3) * 0.5 + 0.5))
+  elseif dm == 6 then amt = (phase == 1) and 58 or 31 end
+  local jit = ui.get(E.djit)
+  if jit > 0 then amt = clamp(amt + rndP * jit, 0, 58) end
+  if ui.get(K.inv) then side = -side end
+  side = side * abFlip
+  if side == 0 then side = 1 end
+
+  defActive = false
+  local dtNow = isNativeDtActive()
+  lastAA.dtActive = dtNow
+  local dtAllowed = (not ui.get(D.dtOnly)) or dtNow
+  local defWhere = ui.get(D.where)
+  local stateAllowed = (defWhere == 3) or (defWhere == 2 and (real == 4 or real == 3)) or (defWhere == 1 and real == 4)
+  if ui.get(D.on) and dtAllowed and stateAllowed and not manual and exposed then
+    if isDefActive(pk, choked, ui.get(D.pat)) then
+      defActive = true
+      local sens = ui.get(D.sens)
+      cmd.yaw = nyaw(baseYaw + ui.get(D.yaw) * phase + rndYaw * sens * 1.4)
+      cmd.pitch = clamp(ui.get(D.pitch) + rndP * sens * 0.25, -89, 89)
+      side = -side; amt = 58
+    end
+  end
+
+  cmd.desync_amount = clamp(amt, 0, 58)
+  cmd.desync_side = side
+
+  lastAA.state, lastAA.side, lastAA.amount = idx, side, cmd.desync_amount
+  lastAA.manual, lastAA.def = manual, defActive
+
+  if tpPhase == 1 and real == 4 and ui.get(D.tp) then
+    local n = ui.get(D.tpChoke)
+    if tpChoked < n then cmd.choke = true; tpChoked = tpChoked + 1
+    else cmd.send_packet = true; tpChoked = 0; tpPhase = 2 end
+  elseif ui.get(FL.on) then
+    local maxN, var = ui.get(FL.max), ui.get(FL.var)
+    if not flTarget then flTarget = clamp(maxN + math.random(-var, var), 1, 14) end
+    if flChoked < flTarget then cmd.choke = true; flChoked = flChoked + 1
+    else cmd.send_packet = true; flChoked, flTarget = 0, nil end
+  end
+end)
+
+-- ============================================================ Housekeeping
+client.every(1, function()
+  local now = globals.realtime()
+  if abStage ~= 0 and now - abAt > 4 then abStage, abFlipV, abYawV = 0, 1, 0 end
+end)
+
+local function resetRound()
+  PK.anchor, PK.returning = nil, false
+  if PK.dtOn then setNativeControl(dtHandles, false, true); PK.dtOn = false end
+  for slot in pairs(S) do clearOverride(slot) end
+  rows = {}
+  resetStreak(); rerollRound(); updateRes()
+end
+client.set_event_callback('round_start', resetRound)
+
+client.set_event_callback('shutdown', function()
+  for slot in pairs(S) do clearOverride(slot) end
+  setNativeControl(dtHandles, false, true)
+  setNativeControl(tpHandles, false, true)
+end)
+
+client.set_event_callback('player_disconnect', function(e)
+  if e and e.slot then
+    clearOverride(e.slot)
+    S[e.slot], A[e.slot], curOrigin[e.slot], curHealth[e.slot] = nil, nil, nil, nil
+    if lastEngagedSlot == e.slot then lastEngagedSlot = nil end
+  end
+end)
+
+-- ============================================================ Pool-Safe 2D Drawing Primitives
+local function RRect(x, y, w, h, r, g, b, a, rad)
+  renderer.rounded_rectangle(x, y, w, h, r, g, b, a, math.max(1, rad or 1))
+end
+
+local function RText(x, y, s, size, font, col, a, align, outline)
+  renderer.text_ex(x, y, tostring(s or ''), {
+    font = font or 'ui_bold',
+    size = size or 13,
+    align = align or 'left',
+    outline = (outline == true),
+    rotation = 0,
+    color = {col[1] or 220, col[2] or 230, col[3] or 245, a or col[4] or 255}
+  })
+end
+
+-- ============================================================ Visuals (Pool-Safe HUD & Indicators)
+local drawWatermark, drawBinds, drawHitlog, drawIndicators, drawDebug, drawKillsay, drawKillPopup, drawResolverPanel, drawResolverTags
+do
+local fpsS = 60
+local WM_NAME = 'ANTINEVERLOSE'
+
+drawWatermark = function(sw, r, g, b)
+  local fps = 1 / math.max(globals.frametime(), 0.001)
+  fpsS = fpsS + (fps - fpsS) * 0.08
+  local ping = math.floor((client.latency() or 0) * 1000)
+  local nameW = renderer.measure_text(WM_NAME, 13, 'ui_bold')
+  local items = {
+    string.format('%d ms', ping),
+    string.format('%d fps', math.floor(fpsS)),
+    os.date('%H:%M:%S'),
+  }
+  local gap, widths, total = 14, {}, 0
+  for i, t in ipairs(items) do
+    widths[i] = renderer.measure_text(t, 12, 'ui_bold')
+    total = total + widths[i] + gap
+  end
+  local pillW = nameW + 18
+  local h = 26
+  local w = 4 + pillW + 8 + total
+  local x, y = sw - w - 14, 12
+  RRect(x, y, w, h, 8, 14, 22, 235, 6)
+  RRect(x + 3, y + 3, pillW, h - 6, 11, 52, 82, 220, 5)
+  RText(x + 12, y + 6, WM_NAME, 13, 'ui_bold', {235, 242, 255}, 255, 'left', false)
+  local tx = x + 3 + pillW + 8
+  for i, t in ipairs(items) do
+    RText(tx, y + 7, t, 12, 'ui_bold', {185, 200, 220}, 255, 'left', false)
+    tx = tx + widths[i] + gap
+  end
+end
+
+local bindAnim, bindState, bindW = {}, {}, 140
+drawBinds = function(sh, r, g, b)
+  local m = lastAA.manual
+  local list = {
+    {'Desync inverter', ui.get(K.inv) and 'on' or nil},
+    {'Manual left', (m == 'L') and 'on' or nil},
+    {'Manual right', (m == 'R') and 'on' or nil},
+    {'Manual back', (m == 'B') and 'on' or nil},
+    {'Min damage override', ui.get(X.dmgKey) and tostring(ui.get(X.dmgVal)) or nil},
+    {'Auto lethal body', eff.lethal and ('<=' .. ui.get(X.lowHp) .. 'hp') or nil},
+    {'Smart peek', (PK.held or PK.returning) and (PK.returning and 'return' or 'active') or nil},
+    {'Defensive AA', lastAA.def and 'dt-split' or nil},
+    {'Auto teleport', tpActive and 'air-shift' or nil},
+    {'Hit-swap side', (ui.get(K.swapHit) and hitSwapCount > 0) and (lastAA.side > 0 and 'LEFT' or 'RIGHT') or nil},
+    {'Anti-bruteforce', (abStage > 0 and ui.get(K.ab)) and ('x' .. abStage) or nil},
+  }
+  local dt = math.min(globals.frametime(), 0.05)
+  local k = 1 - math.exp(-dt * 14)
+  local maxA, rowsH, wantW = 0, 0, 140
+  for _, it in ipairs(list) do
+    local name, st = it[1], it[2]
+    if st then bindState[name] = st end
+    local a = bindAnim[name] or 0
+    a = a + ((st and 1 or 0) - a) * k
+    bindAnim[name] = a
+    if a > 0.02 then
+      maxA = math.max(maxA, a); rowsH = rowsH + a * 20
+      local rw = renderer.measure_text(name, 12, 'ui_bold') + renderer.measure_text(bindState[name] or '', 12, 'ui_bold') + 42
+      wantW = math.max(wantW, rw)
+    end
+  end
+  if maxA < 0.02 then return end
+  bindW = bindW + (wantW - bindW) * k
+  local x, y = 20, math.floor(sh * 0.27)
+  local w, h = bindW, 28 + rowsH + 4
+  local A = maxA
+  RRect(x, y, w, h, 8, 14, 22, math.floor(235 * A), 6)
+  drawIcon(ICONS.mouse, x + 8, y + 6, 14, r, g, b, math.floor(255 * A))
+  RText(x + 26, y + 6, 'Keybinds', 13, 'ui_bold', {235, 242, 255}, math.floor(255 * A), 'left', false)
+  RRect(x + 8, y + 25, w - 16, 1, 18, 32, 48, math.floor(255 * A), 1)
+  local ry = y + 30
+  for _, it in ipairs(list) do
+    local name = it[1]
+    local a = bindAnim[name] or 0
+    if a > 0.02 then
+      local al = math.floor(255 * a)
+      local stText = bindState[name] or ''
+      local sw2 = renderer.measure_text(stText, 12, 'ui_bold')
+      RText(x + 12, ry, name, 12, 'ui_bold', {200, 212, 228}, al, 'left', false)
+      RText(x + w - 12 - sw2, ry, stText, 12, 'ui_bold', {r, g, b}, al, 'left', false)
+      ry = ry + a * 20
+    end
+  end
+end
+
+local HIT, MISS, KILL = {125, 230, 160}, {255, 110, 120}, {255, 205, 100}
+drawHitlog = function(sh)
+  local now = globals.realtime()
+  for i = #rows, 1, -1 do
+    if now - rows[i].at >= LOG_LIFE then table.remove(rows, i) end
+  end
+  local y0 = math.floor(sh * 0.54)
+  for i, row in ipairs(rows) do
+    local age = now - row.at
+    local fadeOut = clamp((LOG_LIFE - age) / 0.4, 0, 1)
+    local slide = clamp(age / 0.18, 0, 1)
+    local alpha = math.floor(255 * fadeOut * slide)
+    local col = (row.kind == 'hit' and HIT) or (row.kind == 'kill' and KILL) or MISS
+    local w = renderer.measure_text(row.text, 13, 'ui_bold') + 28
+    local x = 20 - (1 - slide) * 24
+    local y = y0 + (i - 1) * 28
+    RRect(x, y, w, 24, 8, 14, 22, math.floor(alpha * 0.9), 6)
+    RRect(x, y, 4, 24, col[1], col[2], col[3], alpha, 2)
+    RText(x + 14, y + 5, row.text, 13, 'ui_bold', col, alpha, 'left', false)
+  end
+end
+
+local function drawTags(cx, y, tags, r, g, b)
+  local total, widths = 0, {}
+  for i, t in ipairs(tags) do
+    widths[i] = renderer.measure_text(t.text, 11, 'ui_bold') + 14
+    total = total + widths[i] + 4
+  end
+  local x = cx - (total - 4) / 2
+  for i, t in ipairs(tags) do
+    local c = t.color or {r, g, b}
+    RRect(x, y, widths[i], 17, 8, 14, 22, 230, 5)
+    RRect(x + 4, y + 15, widths[i] - 8, 2, c[1], c[2], c[3], 255, 1)
+    RText(x + 7, y + 2, t.text, 11, 'ui_bold', c, 255, 'left', false)
+    x = x + widths[i] + 4
+  end
+end
+
+drawIndicators = function(sw, sh, r, g, b)
+  local cx, cy = sw / 2, sh / 2
+  local now = globals.realtime()
+  local pulse = math.sin(now * 3) * 0.5 + 0.5
+  local aaOn = ui.get(E.aa)
+
+  if aaOn then
+    local m = lastAA.manual
+    if m == 'L' then RText(cx - 56, cy - 7, '<', 16, 'gotham', {r, g, b}, 255, 'center', true) end
+    if m == 'R' then RText(cx + 56, cy - 7, '>', 16, 'gotham', {r, g, b}, 255, 'center', true) end
+    if m == 'B' then RText(cx, cy + 44, 'v', 15, 'gotham', {r, g, b}, 255, 'center', true) end
+  end
+
+  local y = cy + 26
+  RText(cx, y, 'ANTINEVERLOSE', 14, 'ui_bold', {r, g, b}, math.floor(195 + 60 * pulse), 'center', true)
+  y = y + 20
+
+  local known = eff.at > 0
+  local dmg = known and eff.dmg or 0
+  local ovr = ui.get(X.dmgKey)
+  local dr, dg, db = r, g, b
+  if eff.lethal then dr, dg, db = 120, 230, 160
+  elseif ovr then dmg = ui.get(X.dmgVal); dr, dg, db = 255, 205, 100 end
+
+  local pw, ph = 64, 22
+  local lx, rx = cx - pw - 4, cx + 4
+  RRect(lx, y, pw, ph, 8, 14, 22, 230, 5)
+  local dFrac = clamp(dmg / 120, 0, 1)
+  if dFrac > 0 then RRect(lx + 4, y + ph - 4, (pw - 8) * dFrac, 2, dr, dg, db, 255, 1) end
+  RText(lx + pw / 2, y + 3, (eff.lethal and 'LTH ' or 'DMG ') .. math.floor(dmg), 11, 'ui_bold', {dr, dg, db}, 255, 'center', false)
+
+  local hc = known and eff.hc or 0
+  RRect(rx, y, pw, ph, 8, 14, 22, 230, 5)
+  local hFrac = clamp(hc / 100, 0, 1)
+  if hFrac > 0 then RRect(rx + 4, y + ph - 4, (pw - 8) * hFrac, 2, r, g, b, 255, 1) end
+  RText(rx + pw / 2, y + 3, 'HC ' .. math.floor(hc) .. '%', 11, 'ui_bold', {215, 225, 240}, 255, 'center', false)
+  y = y + 28
+
+  if aaOn then
+    local label = ST_NAMES[lastAA.state] or 'Shared'
+    if lastAA.manual then label = 'MANUAL' end
+    RText(cx, y, 'AA  ' .. string.upper(label) .. (lastAA.side > 0 and ' [LEFT]' or ' [RIGHT]'), 11, 'code', {225, 232, 242}, 255, 'center', true)
+    y = y + 15
+    local bw = 76
+    RRect(cx - bw / 2, y, bw, 5, 14, 22, 34, 230, 2)
+    local fill = math.max(2, (lastAA.amount / 58) * (bw / 2))
+    if lastAA.side > 0 then RRect(cx, y, fill, 5, r, g, b, 255, 2)
+    else RRect(cx - fill, y, fill, 5, r, g, b, 255, 2) end
+    RRect(cx - 1, y - 1, 2, 7, r, g, b, 255, 1)
+    y = y + 10
+  end
+
+  local tags = {}
+  if eff.lethal then tags[#tags + 1] = {text = 'FORCE BODY (LETHAL)', color = {120, 230, 160}} end
+  if ovr then tags[#tags + 1] = {text = 'DMG OVR', color = {255, 205, 100}} end
+  if lastAA.def then tags[#tags + 1] = {text = 'DT DEFENSIVE', color = {255, 120, 140}} end
+  if tpActive then tags[#tags + 1] = {text = 'AIR TELEPORT', color = {190, 140, 255}} end
+  if PK.returning then tags[#tags + 1] = {text = 'PEEK RETURN', color = {255, 200, 90}}
+  elseif PK.held then tags[#tags + 1] = {text = 'SMART PEEK', color = {120, 230, 190}} end
+  if abStage > 0 and ui.get(K.ab) then tags[#tags + 1] = {text = 'AB x' .. abStage, color = {255, 170, 90}} end
+  local bt = ui.get(X.bt)
+  if bt == 2 then tags[#tags + 1] = {text = 'BT MAX'} elseif bt == 3 then tags[#tags + 1] = {text = 'IDEAL + ONSHOT'} end
+  if #tags > 0 then drawTags(cx, y, tags, r, g, b) end
+end
+
+drawDebug = function(r, g, b)
+  local n = 0
+  for _, slot in ipairs(entity.get_players(true)) do
+    if entity.is_alive(slot) then
+      local e = entity.get(slot)
+      local st = S[slot]
+      local info = A[slot]
+      if e and e.origin and st then
+        local p = e.origin
+        local x, y = renderer.world_to_screen(p.X, p.Y + 48, p.Z)
+        if x then
+          n = n + 1; if n > 5 then break end
+          local kind = (info and info.isStatic and 'STATIC') or (info and info.isJitter and 'JITTER') or 'SCAN'
+          local txt = string.format('[%s] %s  M%d H%d%s', kind, HYPN[st.last] or '?', st.misses, st.hits, st.lock and ' LOCK' or '')
+          RText(x, y, txt, 11, 'code', {r, g, b}, 255, 'center', true)
+        end
+      end
+    end
+  end
+end
+
+drawKillsay = function(sw, sh, r, g, b)
+  if not ks.text then return end
+  local age = globals.realtime() - ks.at
+  if age > 3.2 then ks.text = nil; return end
+  local a = math.floor(255 * clamp((3.2 - age) / 0.6, 0, 1) * clamp(age / 0.15, 0, 1))
+  local y = sh * 0.2 - clamp(age * 6, 0, 18)
+  RText(sw / 2, y, ks.text, 26, 'gotham', {r, g, b}, a, 'center', true)
+end
+
+drawKillPopup = function(sw, sh, r, g, b)
+  if not kstreak.popup then return end
+  local age = globals.realtime() - kstreak.popupAt
+  local life = 1.8
+  if age > life then kstreak.popup = nil; return end
+  local grow = clamp(age / 0.18, 0, 1)
+  local size = math.floor(16 + 18 * grow)
+  local fade = (age > life - 0.5) and clamp((life - age) / 0.5, 0, 1) or 1
+  local a = math.floor(255 * fade)
+  local y = sh * 0.14
+  RText(sw / 2, y, kstreak.popup, size, 'gotham', kstreak.popupColor, a, 'center', true)
+end
+
+local FRIENDLY = {
+  [1] = 'Wall/Edge Freestand', [2] = 'Full Desync (+58 deg)', [3] = 'Opposite Full (-58 deg)',
+  [4] = 'Half Desync (+32 deg)', [5] = 'Opposite Half (-32 deg)', [6] = 'Center Axis (0 deg)',
+  [7] = 'Public Foot Yaw', [8] = 'Tick-Split Alternation',
+}
+
+local function trimText(s, maxw, size, font)
+  if renderer.measure_text(s, size, font) <= maxw then return s end
+  local guard = 0
+  while #s > 1 and guard < 40 and renderer.measure_text(s .. '..', size, font) > maxw do
+    s = s:sub(1, #s - 1); guard = guard + 1
+  end
+  return s .. '..'
+end
+
+local function panelCorner(sw, sh, w, h, corner)
+  local pad = 22
+  local x = (corner == 1 or corner == 3) and pad or (sw - w - pad)
+  local y = (corner == 1 or corner == 2) and sh * 0.22 or (sh - h - pad)
+  return x, y
+end
+
+local function confColor(st)
+  local hh = st and (st.lock or st.last)
+  local conf = hh and hypRate(hh) or 0
+  if st and st.lock then return 120, 230, 160, 'LOCKED', conf
+  elseif not hh or (st.hits + st.misses) < 1 then return 130, 175, 255, 'READY S' .. (st and st.stage or 1), conf
+  elseif conf >= 0.6 then return 170, 225, 115, 'HIGH CONF', conf
+  elseif conf >= 0.4 then return 255, 205, 100, 'BRUTE S' .. st.stage, conf
+  else return 255, 110, 120, 'BRUTE S' .. st.stage, conf end
+end
+
+local function statBlock(x, y, w, label, value, vr, vg, vb, frac)
+  RRect(x, y, w, 42, 10, 17, 26, 235, 5)
+  RText(x + 8, y + 4, label, 10, 'ui_bold', {145, 158, 178}, 255, 'left', false)
+  RText(x + 8, y + 15, value, 16, 'gotham', {vr, vg, vb}, 255, 'left', false)
+  RRect(x + 6, y + 35, w - 12, 3, 20, 30, 44, 255, 1)
+  local fw = (w - 12) * clamp(frac, 0, 1)
+  if fw > 1 then RRect(x + 6, y + 35, fw, 3, vr, vg, vb, 255, 1) end
+end
+
+drawResolverPanel = function(sw, sh, r, g, b)
+  if not R.enabled or nui.is_menu_open() then return end
+
+  local targetSlot = crosshairSlot or nearestSlot or lastEngagedSlot
+  if not targetSlot then
+    local enemies = entity.get_players(true)
+    if enemies and #enemies > 0 then targetSlot = enemies[1] end
+  end
+
+  local lockedCount = 0
+  for _, st in pairs(S) do if st.lock then lockedCount = lockedCount + 1 end end
+
+  local w = 286
+  local headH, statsH, targetH, footH = 36, 52, 96, 26
+  local h = headH + statsH + targetH + footH + 14
+  local x, y = panelCorner(sw, sh, w, h, ui.get(V.rpcorner))
+  local pulse = math.sin(globals.realtime() * 3.5) * 0.5 + 0.5
+
+  RRect(x, y, w, h, 6, 11, 17, 238, 8)
+  RRect(x + 4, y, w - 8, 2, r, g, b, 255, 1)
+
+  drawIcon(ICONS.rage, x + 10, y + 10, 16, r, g, b, 255)
+  RText(x + 30, y + 7, 'RESOLVER INTEL', 13, 'ui_bold', {240, 245, 255}, 255, 'left', false)
+  RText(x + 30, y + 20, '[' .. FORCED_TAG .. ']', 10, 'code', {r, g, b}, 220, 'left', false)
+
+  local statusTxt = lockedCount > 0 and ('LOCKED: ' .. lockedCount) or 'ACTIVE'
+  local sCol = lockedCount > 0 and {120, 230, 160} or {r, g, b}
+  local swPill = renderer.measure_text(statusTxt, 10, 'ui_bold') + 20
+  RRect(x + w - swPill - 10, y + 10, swPill, 18, sCol[1], sCol[2], sCol[3], 32, 9)
+  RRect(x + w - swPill - 3, y + 16, 6, 6, sCol[1], sCol[2], sCol[3], math.floor(180 + 75 * pulse), 3)
+  RText(x + w - swPill + 7, y + 12, statusTxt, 10, 'ui_bold', sCol, 255, 'left', false)
+  RRect(x + 10, y + headH, w - 20, 1, 18, 30, 44, 255, 1)
+
+  local sy = y + headH + 6
+  local tot = totals.hit + totals.miss
+  local acc = tot > 0 and (totals.hit / tot) or 0
+  local colW = math.floor((w - 28) / 3)
+  statBlock(x + 10, sy, colW, 'HITS', tostring(totals.hit), 120, 230, 160, tot > 0 and (totals.hit / tot) or 0)
+  statBlock(x + 14 + colW, sy, colW, 'MISSES', tostring(totals.miss), 255, 110, 120, tot > 0 and (totals.miss / tot) or 0)
+  statBlock(x + 18 + colW * 2, sy, colW, 'ACCURACY', math.floor(acc * 100) .. '%', r, g, b, acc)
+
+  local ry = sy + statsH
+  RRect(x + 10, ry, w - 20, targetH, 10, 17, 26, 235, 6)
+
+  if targetSlot then
+    local st = getState(targetSlot)
+    local info = A[targetSlot]
+    local cr, cg, cb, label = confColor(st)
+    local nm = entity.get_name(targetSlot) or ('Player #' .. targetSlot)
+    local alive = entity.is_alive(targetSlot)
+    local hp = alive and (curHealth[targetSlot] or 100) or 0
+    local isLethal = alive and ui.get(X.autoLethal) and hp <= ui.get(X.lowHp)
+    if isLethal then label = 'LETHAL BODY'; cr, cg, cb = 120, 230, 160 end
+
+    RRect(x + 18, ry + 10, 30, 30, 16, 26, 40, 255, 15)
+    RRect(x + 18, ry + 10, 30, 3, cr, cg, cb, 255, 2)
+    local initCh = (#nm > 0) and nm:sub(1, 1):upper() or '?'
+    RText(x + 33, ry + 17, initCh, 14, 'ui_bold', {235, 242, 255}, 255, 'center', false)
+
+    local distStr = ''
+    local mp = localPos()
+    local to = curOrigin[targetSlot]
+    if mp and to then
+      local dm = math.floor(math.sqrt((to.X - mp.X) ^ 2 + (to.Z - mp.Z) ^ 2) / 12)
+      distStr = string.format('  %dm', dm)
+    end
+    RText(x + 56, ry + 8, trimText(nm, 118, 12, 'ui_bold') .. distStr, 12, 'ui_bold', {230, 236, 248}, 255, 'left', false)
+
+    local hpFrac = clamp(hp / 100, 0, 1)
+    local hpr = math.floor(255 * (1 - hpFrac))
+    local hpg = math.floor(230 * hpFrac + 60 * (1 - hpFrac))
+    RRect(x + 56, ry + 26, 96, 4, 20, 30, 44, 255, 2)
+    if hp > 0 then RRect(x + 56, ry + 26, math.max(2, 96 * hpFrac), 4, hpr, hpg, 115, 255, 2) end
+    RText(x + 158, ry + 22, alive and (hp .. ' HP') or 'DEAD', 10, 'code', {165, 178, 198}, 255, 'left', false)
+
+    local lw = renderer.measure_text(label, 10, 'ui_bold') + 14
+    RRect(x + w - 18 - lw, ry + 8, lw, 16, cr, cg, cb, 36, 8)
+    RText(x + w - 18 - lw + 7, ry + 10, label, 10, 'ui_bold', {cr, cg, cb}, 255, 'left', false)
+
+    local aaKind = (info and info.isJitter and 'JITTER AA') or 'STATIC 58'
+    local edgeTxt = (info and info.edgeSide) and (info.edgeSide > 0 and ' | EDGE: L' or ' | EDGE: R') or ''
+    local chokeTxt = (info and (info.choked or 0) > 0) and string.format(' | FL: %dt', info.choked) or ''
+    RText(x + 18, ry + 45, 'Profile: ' .. aaKind .. edgeTxt .. chokeTxt, 10, 'code', {175, 190, 215}, 255, 'left', false)
+
+    local hh = st.lock or st.last or 1
+    local degStr = string.format(' (%+d deg)', math.floor(st.lastAngle or 0))
+    RText(x + 18, ry + 59, 'Angle: ' .. (FRIENDLY[hh] or 'Auto') .. degStr, 10, 'code', {cr, cg, cb}, 255, 'left', false)
+
+    RText(x + 18, ry + 76, 'History:', 10, 'code', {135, 148, 168}, 255, 'left', false)
+    local px = x + 70
+    for pi = 1, 8 do
+      local v = st.seq[pi]
+      local pc = (v == true and {120, 230, 160}) or (v == false and {255, 110, 120}) or {22, 32, 46}
+      RRect(px, ry + 78, 12, 8, pc[1], pc[2], pc[3], v == nil and 180 or 255, 2)
+      px = px + 15
+    end
+    local tTot = st.hits + st.misses
+    local tRate = tTot > 0 and (math.floor(st.hits / tTot * 100) .. '%') or 'NEW'
+    RText(x + w - 20 - renderer.measure_text(tRate, 10, 'ui_bold'), ry + 76, tRate, 10, 'ui_bold', {205, 215, 235}, 255, 'left', false)
+  else
+    RText(x + w / 2, ry + 32, 'WAITING FOR ENEMY SPAWN', 12, 'ui_bold', {150, 165, 190}, 255, 'center', false)
+    RText(x + w / 2, ry + 50, 'Persistent memory & Freestand active', 10, 'code', {120, 132, 152}, 255, 'center', false)
+  end
+
+  local fy = ry + targetH + 6
+  local dtStr = lastAA.dtActive and 'DT: ON' or 'DT: IDLE'
+  local lthStr = ui.get(X.autoLethal) and ('LETHAL <=' .. ui.get(X.lowHp) .. 'HP') or 'LETHAL: OFF'
+  local swpStr = ui.get(K.swapHit) and 'HIT-SWAP: ON' or 'AB: ON'
+  local footText = string.format('%s  |  %s  |  %s', dtStr, lthStr, swpStr)
+  RText(x + w / 2, fy + 4, footText, 10, 'code', {145, 160, 184}, 255, 'center', false)
+end
+
+drawResolverTags = function()
+  if not R.enabled then return end
+  local n = 0
+  for _, slot in ipairs(entity.get_players(true)) do
+    if entity.is_alive(slot) then
+      local e = entity.get(slot)
+      local st = S[slot]
+      if e and e.origin and st then
+        local x, y = renderer.world_to_screen(e.origin.X, e.origin.Y + 40, e.origin.Z)
+        if x then
+          n = n + 1; if n > 8 then break end
+          local cr, cg, cb, label = confColor(st)
+          local hp = curHealth[slot]
+          if ui.get(X.autoLethal) and hp and hp <= ui.get(X.lowHp) then
+            label = 'LETHAL BODY (' .. hp .. ')'
+            cr, cg, cb = 120, 230, 160
+          end
+          RText(x, y, label, 11, 'code', {cr, cg, cb}, 255, 'center', true)
+        end
+      end
+    end
+  end
+end
+end
+
+-- ============================================================ Config System
+local CFG = {times = {}}
+do
+  local function copy(v)
+    if type(v) ~= 'table' then return v end
+    local t = {}
+    for k, x in pairs(v) do t[k] = copy(x) end
+    return t
+  end
+  local function same(a, b)
+    if type(a) ~= type(b) then return false end
+    if type(a) ~= 'table' then return a == b end
+    for k, v in pairs(a) do if not same(v, b[k]) then return false end end
+    for k in pairs(b) do if a[k] == nil then return false end end
+    return true
+  end
+  local function ckey(c) return c.group .. '/' .. c.label end
+  local function cval(c)
+    if c.kind == 'hotkey' then return {c.vk, c.mode} end
+    return c.val
+  end
+
+  local AA_DEF = copy(aa)
+  for _, c in ipairs(UIX.VC) do c.def = copy(cval(c)) end
+
+  function CFG.serialize(full)
+    local v = {}
+    for _, c in ipairs(UIX.VC) do
+      if not c.nocfg then
+        local val = cval(c)
+        if full or not same(val, c.def) then v[ckey(c)] = copy(val) end
+      end
+    end
+    local a = {}
+    for i = 1, 5 do
+      if full or not same(aa[i], AA_DEF[i]) then a[tostring(i)] = copy(aa[i]) end
+    end
+    return utils.json_encode({v = v, aa = a, t = os.date('%H:%M')})
+  end
+
+  function CFG.applyTable(t)
+    if type(t) ~= 'table' then return false end
+    if type(t.v) == 'table' then
+      for _, c in ipairs(UIX.VC) do
+        local x = (not c.nocfg) and t.v[ckey(c)] or nil
+        local k = c.kind
+        if x ~= nil then
+          if k == 'hotkey' then
+            if type(x) == 'table' then
+              c.vk = tonumber(x[1]) or c.vk
+              if x[2] == 'Hold' or x[2] == 'Toggle' or x[2] == 'Always' then c.mode = x[2] end
+              c.active, c.prev = (c.mode == 'Always'), false
+            end
+          elseif k == 'color' then
+            if type(x) == 'table' then ui.set(c, x[1], x[2], x[3], x[4]); c.h = nil end
+          elseif k == 'check' then
+            if type(x) == 'boolean' then ui.set(c, x) end
+          elseif k == 'slider' or k == 'combo' then
+            if type(x) == 'number' then ui.set(c, x) end
+          elseif k == 'multi' then
+            if type(x) == 'table' then ui.set(c, x) end
+          elseif k == 'text' then
+            if type(x) == 'string' then ui.set(c, x) end
+          end
+        end
+      end
+    end
+    if type(t.aa) == 'table' then
+      for i = 1, 5 do
+        local s = t.aa[tostring(i)] or t.aa[i]
+        if type(s) == 'table' then
+          for kf, v in pairs(aa[i]) do
+            if type(s[kf]) == type(v) then aa[i][kf] = s[kf] end
+          end
+        end
+      end
+    end
+    return true
+  end
+
+  function CFG.reset()
+    for _, c in ipairs(UIX.VC) do
+      if not c.nocfg then
+        local d = c.def
+        if c.kind == 'hotkey' then
+          c.vk, c.mode, c.active, c.prev = d[1], d[2], (d[2] == 'Always'), false
+        elseif c.kind == 'color' then
+          ui.set(c, d[1], d[2], d[3], d[4]); c.h = nil
+        else
+          ui.set(c, copy(d))
+        end
+      end
+    end
+    for i = 1, 5 do
+      for k, v in pairs(AA_DEF[i]) do aa[i][k] = v end
+    end
+  end
+
+  function CFG.refresh()
+    if UIX.afterApply then pcall(UIX.afterApply) end
+  end
+
+  function CFG.save(i)
+    local ok, s = pcall(CFG.serialize, false)
+    if not ok then return false end
+    pcall(storage.set, 'cfg_' .. i, s)
+    CFG.times[i] = os.date('%H:%M')
+    return true
+  end
+
+  function CFG.load(i)
+    local raw = storage.get('cfg_' .. i)
+    if type(raw) ~= 'string' then return false end
+    local ok, t = pcall(utils.json_decode, raw)
+    if not ok or type(t) ~= 'table' then return false end
+    CFG.reset(); CFG.applyTable(t); CFG.refresh()
+    UIX.dirty = true
+    return true
+  end
+
+  function CFG.export()
+    local s = CFG.serialize(false)
+    client.log('[config] ' .. s)
+    client.log('[config] вставь строку выше между [=[ и ]=] в EMBEDDED_CONFIG и нажми Save source')
+  end
+
+  function CFG.init()
+    local e = EMBEDDED_CONFIG:match('^%s*(.-)%s*$')
+    if e and #e > 2 then
+      local ok, t = pcall(utils.json_decode, e)
+      if ok and type(t) == 'table' then CFG.applyTable(t) end
+    end
+    local auto = storage.get('cfg_auto')
+    if type(auto) == 'string' then
+      local ok, t = pcall(utils.json_decode, auto)
+      if ok and type(t) == 'table' then CFG.applyTable(t) end
+    end
+    ui.set(D.tp, false)
+    for i = 1, 5 do
+      local raw = storage.get('cfg_' .. i)
+      if type(raw) == 'string' then
+        local ok, t = pcall(utils.json_decode, raw)
+        if ok and type(t) == 'table' then CFG.times[i] = t.t or '?' end
+      end
+    end
+    CFG.refresh()
+    UIX.dirty = false
+  end
+
+  client.every(2, function()
+    if UIX.dirty then
+      UIX.dirty = false
+      local ok, s = pcall(CFG.serialize, true)
+      if ok then pcall(storage.set, 'cfg_auto', s) end
+    end
+  end)
+end
+
+-- ============================================================ Authentic ANTINEVERLOSE Menu v6 (With RGBA Icons & Zero White Borders)
+local MN = {w = 820, h = 580, sideW = 232, topH = 56, x = nil, y = nil, tab = 1,
+            prevDown = false, prevR = false, drag = false, dx = 0, dy = 0,
+            active = nil, cdrag = nil, dd = nil, slot = 1,
+            search = '', searchFocus = false,
+            msg = '', msgAt = -10, resetUntil = 0, kpInit = false, kp = {}}
+do
+local I = {mx = 0, my = 0, pressed = false, rpressed = false, down = false}
+
+local TABS = {
+  {cat = 'Aimbot',         name = 'Ragebot',    icon = ICONS.rage,    cols = {{'Resolver'}, {'Ragebot', 'Points'}}},
+  {                        name = 'Anti-Aim',   icon = ICONS.aa,      cols = {{'Main AA', 'Fake lag'}, {'Modifiers', 'Desync'}}},
+  {                        name = 'Binds & AA', icon = ICONS.mouse,   cols = {{'Binds & reactive'}, {'Anti-resolver'}}},
+  {cat = 'Visuals & Misc', name = 'Exploits',   icon = ICONS.weapon,  cols = {{'Defensive'}, {'Smart peek', 'Teleport'}}},
+  {                        name = 'Visuals',    icon = ICONS.players, cols = {{'Visuals'}, {'Killsay'}}},
+  {cat = 'Configuration',  name = 'Configs',    icon = ICONS.gear,    special = true, badge = 'select'},
+}
+
+local RH = {check = 30, slider = 44, combo = 34, multi = 34, hotkey = 32, color = 30, text = 48}
+local CT = {228, 235, 245}
+local CD = {118, 132, 152}
+
+local function inRect(mx, my, x, y, w, h) return mx >= x and mx <= x + w and my >= y and my <= y + h end
+local function T(x, y, s, size, col, font, a)
+  RText(x, y, s, size or 13, font or 'ui_bold', col, a or 255, 'left', false)
+end
+local function TW(s, size, font) local w = renderer.measure_text(s, size or 13, font or 'ui_bold'); return w or 0 end
+local function fit(s, maxw, size, font)
+  if TW(s, size, font) <= maxw then return s end
+  local guard = 0
+  while #s > 1 and guard < 40 and TW(s .. '..', size, font) > maxw do
+    s = s:sub(1, #s - 1); guard = guard + 1
+  end
+  return s .. '..'
+end
+local function changed(c)
+  UIX.dirty = true
+  if c.cb then pcall(c.cb, c) end
+end
+local function lerpc(a, b, t) return math.floor(a + (b - a) * t) end
+
+local function hsv2rgb(h, s, v)
+  local i = math.floor(h * 6) % 6
+  local f = h * 6 - math.floor(h * 6)
+  local p, q, t2 = v * (1 - s), v * (1 - f * s), v * (1 - (1 - f) * s)
+  local r, g, b
+  if i == 0 then r, g, b = v, t2, p elseif i == 1 then r, g, b = q, v, p
+  elseif i == 2 then r, g, b = p, v, t2 elseif i == 3 then r, g, b = p, q, v
+  elseif i == 4 then r, g, b = t2, p, v else r, g, b = v, p, q end
+  return math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5)
+end
+local function rgb2hsv(r, g, b)
+  r, g, b = r / 255, g / 255, b / 255
+  local mx, mn = math.max(r, g, b), math.min(r, g, b)
+  local d = mx - mn
+  local h = 0
+  if d > 0 then
+    if mx == r then h = ((g - b) / d) % 6 elseif mx == g then h = (b - r) / d + 2 else h = (r - g) / d + 4 end
+    h = h / 6
+  end
+  return h, (mx == 0) and 0 or d / mx, mx
+end
+
+function MN.say(s) MN.msg, MN.msgAt = s, globals.realtime() end
+
+-- ---------------------------------------------------------------- Single-Frame Controls (Zero White-Border Pool Bug)
+local ROW = {}
+
+function ROW.check(c, x, y, w, ar, ag, ab)
+  local hov = inRect(I.mx, I.my, x, y, w, RH.check)
+  if hov and I.pressed then c.val = not c.val; I.pressed = false; changed(c) end
+  T(x + 14, y + 7, c.label, 13, c.val and {242, 247, 255} or CT, 'ui_bold')
+  c.an = c.an or (c.val and 1 or 0)
+  c.an = c.an + ((c.val and 1 or 0) - c.an) * 0.28
+  local tw, th = 32, 16
+  local tx, ty = x + w - 14 - tw, y + 7
+  local tr = lerpc(16, 14, c.an)
+  local tg = lerpc(24, 58, c.an)
+  local tb = lerpc(36, 92, c.an)
+  RRect(tx, ty, tw, th, tr, tg, tb, 255, 8)
+  local kr = lerpc(88, ar, c.an)
+  local kg = lerpc(104, ag, c.an)
+  local kb = lerpc(124, ab, c.an)
+  local kx = tx + 2 + (tw - 16) * c.an
+  RRect(kx, ty + 2, 12, 12, kr, kg, kb, 255, 6)
+end
+
+function ROW.slider(c, x, y, w, ar, ag, ab)
+  T(x + 14, y + 4, c.label, 13, CT, 'ui_bold')
+  local vnum = math.floor(c.val + 0.5)
+  local vs = tostring(vnum) .. (c.unit or '')
+  local vbw = math.max(36, TW(vs, 12, 'ui_bold') + 12)
+  local vbx = x + w - 14 - vbw
+  RRect(vbx, y + 3, vbw, 18, 6, 11, 18, 255, 4)
+  RText(vbx + vbw / 2, y + 4, vs, 12, 'ui_bold', {ar, ag, ab}, 255, 'center', false)
+
+  local tx, ty, tw = x + 14, y + 29, w - 28
+  if I.pressed and inRect(I.mx, I.my, tx - 4, ty - 8, tw + 8, 18) then MN.active = c; I.pressed = false end
+  if MN.active == c and I.down then
+    local f = clamp((I.mx - tx) / tw, 0, 1)
+    local nv = math.floor(c.min + (c.max - c.min) * f + 0.5)
+    if nv ~= c.val then c.val = nv; changed(c) end
+  end
+  local frac = (c.max > c.min) and (c.val - c.min) / (c.max - c.min) or 0
+  RRect(tx, ty, tw, 4, 16, 24, 36, 255, 2)
+  RRect(tx, ty, math.max(2, tw * frac), 4, ar, ag, ab, frac > 0.001 and 255 or 0, 2)
+  RRect(tx + tw * frac - 6, ty - 4, 12, 12, ar, ag, ab, 255, 6)
+end
+
+local function boxWidth(c, w)
+  return clamp(w - 28 - TW(c.label, 13, 'ui_bold') - 12, 102, 136)
+end
+
+function ROW.combo(c, x, y, w, ar, ag, ab)
+  T(x + 14, y + 8, c.label, 13, CT, 'ui_bold')
+  local bw = boxWidth(c, w)
+  local bx, by, bh = x + w - 14 - bw, y + 5, 24
+  local hov = inRect(I.mx, I.my, bx, by, bw, bh)
+  if I.pressed and hov then
+    if MN.dd and MN.dd.c == c then MN.dd = nil
+    else MN.dd = {c = c, x = bx, y = by + bh + 3, w = bw, h = #c.opts * 24 + 4} end
+    I.pressed = false
+  end
+  local open = MN.dd and MN.dd.c == c
+  RRect(bx, by, bw, bh, open and 16 or (hov and 12 or 6), open and 32 or (hov and 20 or 11), open and 48 or (hov and 32 or 18), 255, 5)
+  T(bx + 9, by + 5, fit(c.opts[c.val] or '', bw - 26, 12, 'ui_bold'), 12, CT, 'ui_bold')
+  T(bx + bw - 15, by + 5, 'v', 11, open and {ar, ag, ab} or CD, 'ui_bold')
+end
+
+function ROW.multi(c, x, y, w, ar, ag, ab)
+  T(x + 14, y + 8, c.label, 13, CT, 'ui_bold')
+  local bw = boxWidth(c, w)
+  local bx, by, bh = x + w - 14 - bw, y + 5, 24
+  local hov = inRect(I.mx, I.my, bx, by, bw, bh)
+  if I.pressed and hov then
+    if MN.dd and MN.dd.c == c then MN.dd = nil
+    else MN.dd = {c = c, x = bx, y = by + bh + 3, w = math.max(bw, 148), h = #c.opts * 24 + 4} end
+    I.pressed = false
+  end
+  local n, first = 0, nil
+  for i, v in ipairs(c.val) do if v then n = n + 1; first = first or c.opts[i] end end
+  local s = (n == 0) and 'None' or ((n == 1) and first or (n .. ' selected'))
+  local open = MN.dd and MN.dd.c == c
+  RRect(bx, by, bw, bh, open and 16 or (hov and 12 or 6), open and 32 or (hov and 20 or 11), open and 48 or (hov and 32 or 18), 255, 5)
+  T(bx + 9, by + 5, fit(s, bw - 26, 12, 'ui_bold'), 12, CT, 'ui_bold')
+  T(bx + bw - 15, by + 5, 'v', 11, open and {ar, ag, ab} or CD, 'ui_bold')
+end
+
+local MODE_SHORT = {Hold = 'hold', Toggle = 'toggle', Always = 'always'}
+function ROW.hotkey(c, x, y, w, ar, ag, ab)
+  T(x + 14, y + 8, c.label, 13, CT, 'ui_bold')
+  local keyStr = (UIX.listen == c) and '...' or UIX.vkName(c.vk)
+  local sub = MODE_SHORT[c.mode] or 'hold'
+  local bw = 108
+  local bx, by, bh = x + w - 14 - bw, y + 4, 24
+  local hov = inRect(I.mx, I.my, bx, by, bw, bh)
+  if hov and I.pressed then
+    UIX.listen, UIX.focus, MN.searchFocus, MN.kpInit = c, nil, false, false
+    I.pressed = false
+  elseif hov and I.rpressed then
+    c.mode = (c.mode == 'Hold') and 'Toggle' or ((c.mode == 'Toggle') and 'Always' or 'Hold')
+    c.active = (c.mode == 'Always')
+    I.rpressed = false; changed(c)
+  end
+  local hi = (UIX.listen == c or c.active)
+  RRect(bx, by, bw, bh, hi and 14 or 6, hi and 34 or 11, hi and 52 or 18, 255, 5)
+  T(bx + 9, by + 5, keyStr, 12, c.active and {ar, ag, ab} or CT, 'ui_bold')
+  T(bx + bw - 7 - TW(sub, 11, 'ui_bold'), by + 6, sub, 11, CD, 'ui_bold')
+end
+
+function ROW.color(c, x, y, w, ar, ag, ab)
+  T(x + 14, y + 7, c.label, 13, CT, 'ui_bold')
+  local sx, sy = x + w - 14 - 30, y + 6
+  if I.pressed and inRect(I.mx, I.my, sx, sy, 30, 18) then
+    if MN.dd and MN.dd.c == c then MN.dd = nil
+    else
+      c.h, c.s, c.v = rgb2hsv(c.val[1], c.val[2], c.val[3])
+      MN.dd = {c = c, x = math.max(x + 6, sx - 130), y = sy + 22, w = 160, h = 82}
+    end
+    I.pressed = false
+  end
+  RRect(sx, sy, 30, 18, c.val[1], c.val[2], c.val[3], 255, 4)
+end
+
+function ROW.text(c, x, y, w, ar, ag, ab)
+  T(x + 14, y + 3, c.label, 13, CT, 'ui_bold')
+  local bx, by, bw, bh = x + 14, y + 22, w - 28, 22
+  if I.pressed and inRect(I.mx, I.my, bx, by, bw, bh) then
+    UIX.focus, UIX.listen, MN.searchFocus, MN.kpInit = c, nil, false, false
+    I.pressed = false
+  end
+  local focused = UIX.focus == c
+  RRect(bx, by, bw, bh, focused and 14 or 6, focused and 32 or 11, focused and 48 or 18, 255, 5)
+  local s = c.val
+  if focused and math.floor(globals.realtime() * 2) % 2 == 0 then s = s .. '|' end
+  local guard = 0
+  while #s > 1 and guard < 200 and TW(s, 12, 'ui_bold') > bw - 14 do s = s:sub(2); guard = guard + 1 end
+  T(bx + 8, by + 4, s, 12, CT, 'ui_bold')
+end
+
+function MN.overlayInput()
+  local dd = MN.dd
+  if not dd then return end
+  local c = dd.c
+  local inside = inRect(I.mx, I.my, dd.x, dd.y, dd.w, dd.h)
+  if c.kind == 'combo' or c.kind == 'multi' then
+    if I.pressed and inside then
+      local idx = math.floor((I.my - dd.y - 2) / 24) + 1
+      if idx >= 1 and idx <= #c.opts then
+        if c.kind == 'combo' then c.val = idx; MN.dd = nil
+        else c.val[idx] = not c.val[idx] end
+        changed(c)
+      end
+      I.pressed = false
+    end
+  else
+    if I.pressed and inside then
+      if inRect(I.mx, I.my, dd.x + 8, dd.y + 8, dd.w - 16, 14) then MN.cdrag = 'h'
+      elseif inRect(I.mx, I.my, dd.x + 8, dd.y + 32, dd.w - 16, 14) then MN.cdrag = 's'
+      elseif inRect(I.mx, I.my, dd.x + 8, dd.y + 56, dd.w - 16, 14) then MN.cdrag = 'v' end
+      I.pressed = false
+    end
+    if not I.down then MN.cdrag = nil end
+    if MN.cdrag and I.down then
+      local f = clamp((I.mx - (dd.x + 8)) / (dd.w - 16), 0, 1)
+      if MN.cdrag == 'h' then c.h = math.min(f, 0.999) elseif MN.cdrag == 's' then c.s = f else c.v = math.max(f, 0.05) end
+      local r, g, b = hsv2rgb(c.h, c.s, c.v)
+      c.val = {r, g, b, c.val[4]}
+      changed(c)
+    end
+  end
+end
+
+function MN.overlayDraw(ar, ag, ab)
+  local dd = MN.dd
+  if not dd then return end
+  local c = dd.c
+  RRect(dd.x, dd.y, dd.w, dd.h, 8, 15, 24, 252, 6)
+  if c.kind == 'combo' or c.kind == 'multi' then
+    for i, opt in ipairs(c.opts) do
+      local oy = dd.y + 2 + (i - 1) * 24
+      local hov = inRect(I.mx, I.my, dd.x, oy, dd.w, 24)
+      local sel = (c.kind == 'combo') and (c.val == i) or (c.kind == 'multi' and c.val[i])
+      if hov then RRect(dd.x + 3, oy, dd.w - 6, 24, 16, 32, 48, 255, 4) end
+      T(dd.x + 10, oy + 5, fit(opt, dd.w - 24, 12, 'ui_bold'), 12, sel and {ar, ag, ab} or CT, 'ui_bold')
+      if c.kind == 'multi' and sel then RRect(dd.x + dd.w - 15, oy + 9, 6, 6, ar, ag, ab, 255, 3) end
+    end
+  else
+    local x0, w0 = dd.x + 8, dd.w - 16
+    local hr, hg, hb = hsv2rgb(c.h or 0, 1, 1)
+    local fr, fg, fb = hsv2rgb(c.h or 0, c.s or 1, c.v or 1)
+    RRect(x0, dd.y + 8, w0, 14, 16, 24, 36, 255, 4)
+    RRect(x0, dd.y + 8, math.max(4, w0 * (c.h or 0)), 14, hr, hg, hb, 255, 4)
+    RRect(x0, dd.y + 32, w0, 14, 16, 24, 36, 255, 4)
+    RRect(x0, dd.y + 32, math.max(4, w0 * (c.s or 1)), 14, fr, fg, fb, 255, 4)
+    RRect(x0, dd.y + 56, w0, 14, 16, 24, 36, 255, 4)
+    RRect(x0, dd.y + 56, math.max(4, w0 * (c.v or 1)), 14, fr, fg, fb, 255, 4)
+    local function knob(f, yy) RRect(x0 + w0 * f - 2, yy - 1, 4, 16, ar, ag, ab, 255, 2) end
+    knob(c.h or 0, dd.y + 8); knob(c.s or 0, dd.y + 32); knob(c.v or 0, dd.y + 56)
+  end
+end
+
+local TYPE = {}
+do
+  for i = 0, 25 do TYPE[65 + i] = {string.char(97 + i), string.char(65 + i)} end
+  local sh = ')!@#$%^&*('
+  for i = 0, 9 do TYPE[48 + i] = {tostring(i), sh:sub(i + 1, i + 1)} end
+  TYPE[0x20] = {' ', ' '}
+  TYPE[0xBA] = {';', ':'}; TYPE[0xBB] = {'=', '+'}; TYPE[0xBC] = {',', '<'}; TYPE[0xBD] = {'-', '_'}
+  TYPE[0xBE] = {'.', '>'}; TYPE[0xBF] = {'/', '?'}; TYPE[0xC0] = {'`', '~'}; TYPE[0xDB] = {'[', '{'}
+  TYPE[0xDC] = {'\\', '|'}; TYPE[0xDD] = {']', '}'}; TYPE[0xDE] = {"'", '"'}
+end
+local function keyDown(vk) return UIX.isKeyDown(vk) end
+
+function MN.capture()
+  local c = UIX.listen
+  if not MN.kpInit then
+    MN.kp = {}
+    for vk = 3, 254 do if vk ~= 0x02 and keyDown(vk) then MN.kp[vk] = true end end
+    MN.kpInit = true
+    return
+  end
+  for vk = 3, 254 do
+    if vk ~= 0x02 then
+      local d = keyDown(vk)
+      if d and not MN.kp[vk] then
+        c.vk = (vk == 0x1B) and 0 or vk
+        c.prev = true; UIX.listen = nil; changed(c)
+        return
+      end
+      MN.kp[vk] = d
+    end
+  end
+end
+
+function MN.typing()
+  local isSearch = MN.searchFocus
+  local c = UIX.focus
+  if not isSearch and not c then return end
+  if not MN.kpInit then
+    MN.kp = {}
+    for vk in pairs(TYPE) do if keyDown(vk) then MN.kp[vk] = true end end
+    MN.kp[0x08], MN.kp[0x0D], MN.kp[0x1B] = keyDown(0x08), keyDown(0x0D), keyDown(0x1B)
+    MN.kpInit = true
+    return
+  end
+  local shift = keyDown(0x10)
+  local keys = {0x08, 0x0D, 0x1B}
+  for vk in pairs(TYPE) do keys[#keys + 1] = vk end
+  for _, vk in ipairs(keys) do
+    local d = keyDown(vk)
+    if d and not MN.kp[vk] then
+      if isSearch then
+        if vk == 0x08 then MN.search = MN.search:sub(1, #MN.search - 1)
+        elseif vk == 0x0D or vk == 0x1B then MN.searchFocus = false
+        elseif #MN.search < 32 then MN.search = MN.search .. TYPE[vk][shift and 2 or 1] end
+      else
+        if vk == 0x08 then c.val = c.val:sub(1, #c.val - 1); changed(c)
+        elseif vk == 0x0D or vk == 0x1B then UIX.focus = nil
+        elseif #c.val < 160 then
+          c.val = c.val .. TYPE[vk][shift and 2 or 1]; changed(c)
+        end
+      end
+    end
+    MN.kp[vk] = d
+  end
+end
+
+function MN.button(x, y, w, h, text, ar, ag, ab, hot, iconId)
+  local hov = inRect(I.mx, I.my, x, y, w, h)
+  local clicked = false
+  if hov and I.pressed then clicked = true; I.pressed = false end
+  RRect(x, y, w, h, hot and 16 or (hov and 14 or 8), hot and 48 or (hov and 26 or 15), hot and 78 or (hov and 40 or 24), 245, 5)
+  if iconId then
+    drawIcon(iconId, x + 10, y + math.floor((h - 14) / 2), 14, ar, ag, ab, 255)
+    T(x + 30, y + math.floor((h - 13) / 2) - 1, text, 13, CT, 'ui_bold')
+  else
+    T(x + w / 2 - TW(text, 13, 'ui_bold') / 2, y + math.floor((h - 13) / 2) - 1, text, 13, CT, 'ui_bold')
+  end
+  return clicked
+end
+
+function MN.groupPanel(name, x, y, w, ar, ag, ab, filter)
+  local list = {}
+  for _, c in ipairs(UIX.VC) do
+    if c.group == name and c.vis then
+      if not filter or filter == '' or c.label:lower():find(filter, 1, true) or name:lower():find(filter, 1, true) then
+        list[#list + 1] = c
+      end
+    end
+  end
+  if #list == 0 then return y end
+  local hgt = 44
+  for _, c in ipairs(list) do hgt = hgt + RH[c.kind] end
+  RRect(x, y, w, hgt, 8, 14, 22, 232, 7)
+  T(x + 14, y + 10, name, 15, {242, 247, 255}, 'ui_bold')
+  RRect(x + 12, y + 34, w - 24, 1, 16, 28, 42, 255, 1)
+  local ry = y + 38
+  for _, c in ipairs(list) do
+    ROW[c.kind](c, x, ry, w, ar, ag, ab)
+    ry = ry + RH[c.kind]
+  end
+  return y + hgt + 14
+end
+
+function MN.configsPage(x, y, w, ar, ag, ab)
+  RRect(x, y, w, 250, 8, 14, 22, 232, 7)
+  T(x + 14, y + 10, 'Config slots', 15, {242, 247, 255}, 'ui_bold')
+  RRect(x + 12, y + 34, w - 24, 1, 16, 28, 42, 255, 1)
+  for i = 1, 5 do
+    local ry = y + 42 + (i - 1) * 33
+    local active = (MN.slot == i)
+    if active then RRect(x + 10, ry - 2, w - 20, 29, 11, 52, 82, 180, 5) end
+    if I.pressed and inRect(I.mx, I.my, x + 10, ry - 2, w - 240, 29) then MN.slot = i; I.pressed = false end
+    T(x + 18, ry + 5, 'Slot #' .. i, 13, active and {ar, ag, ab} or CT, 'ui_bold')
+    local st = CFG.times[i] and ('saved ' .. CFG.times[i]) or 'empty'
+    T(x + 96, ry + 6, st, 12, CD, 'ui_bold')
+    if MN.button(x + w - 168, ry, 72, 25, 'Save', ar, ag, ab, false) then
+      MN.slot = i
+      MN.say(CFG.save(i) and ('Saved to slot ' .. i) or 'Save failed')
+    end
+    if MN.button(x + w - 88, ry, 72, 25, 'Load', ar, ag, ab, false) then
+      MN.slot = i
+      MN.say(CFG.load(i) and ('Loaded slot ' .. i) or ('Slot ' .. i .. ' is empty'))
+    end
+  end
+  local by = y + 42 + 5 * 33 + 6
+  if MN.button(x + 14, by, 156, 27, 'Export to console', ar, ag, ab, false) then
+    CFG.export(); MN.say('Exported: see Lua console')
+  end
+  local now = globals.realtime()
+  local armed = now < MN.resetUntil
+  if MN.button(x + 180, by, 176, 27, armed and 'Click again to confirm' or 'Reset to defaults', ar, ag, ab, armed) then
+    if armed then
+      CFG.reset(); CFG.refresh(); UIX.dirty = true
+      MN.resetUntil = 0; MN.say('Reset to defaults')
+    else
+      MN.resetUntil = now + 3
+    end
+  end
+end
+
+function MN.idle()
+  MN.dd, MN.active, MN.cdrag, MN.drag = nil, nil, nil, false
+  UIX.focus, UIX.listen, MN.searchFocus = nil, nil, false
+  MN.prevDown = client.key_state('Mouse1') == true
+end
+
+function MN.draw(sw, sh, ar, ag, ab)
+  local mx, my = client.mouse_position()
+  I.mx, I.my = mx or 0, my or 0
+  local down = client.key_state('Mouse1') == true
+  local rdown = client.key_state('Mouse2') == true
+  I.pressed, I.rpressed, I.down = down and not MN.prevDown, rdown and not MN.prevR, down
+  MN.prevDown, MN.prevR = down, rdown
+  if not down then MN.active = nil end
+
+  if not MN.x then
+    local sx, sy = storage.get('menu_x'), storage.get('menu_y')
+    if type(sx) == 'number' and type(sy) == 'number' then
+      MN.x, MN.y = sx, sy
+    else
+      MN.x, MN.y = math.floor((sw - MN.w) * 0.5), math.floor((sh - MN.h) * 0.5)
+    end
+  end
+  MN.x = clamp(MN.x, 0, math.max(0, sw - MN.w))
+  MN.y = clamp(MN.y, 0, math.max(0, sh - MN.h))
+  local x, y, w, h, sideW, topH = MN.x, MN.y, MN.w, MN.h, MN.sideW, MN.topH
+
+  if MN.drag then
+    if down then
+      MN.x = clamp(I.mx - MN.dx, 0, math.max(0, sw - w))
+      MN.y = clamp(I.my - MN.dy, 0, math.max(0, sh - h))
+      x, y = MN.x, MN.y
+    else
+      MN.drag = false
+      pcall(storage.set, 'menu_x', MN.x); pcall(storage.set, 'menu_y', MN.y)
+    end
+  end
+
+  if UIX.listen then MN.capture() elseif UIX.focus or MN.searchFocus then MN.typing() end
+  MN.overlayInput()
+
+  -- 1. Deep Navy-Black Main Frame (#05080D) + Sidebar (#070D14)
+  RRect(x, y, w, h, 5, 8, 13, 240, 9)
+  RRect(x, y, sideW, h, 7, 13, 20, 248, 9)
+  RRect(x + sideW, y, 1, h, 14, 26, 38, 255, 1)
+  RRect(x + sideW, y + topH, w - sideW, 1, 14, 26, 38, 255, 1)
+
+  -- 2. Large Glowing ANTINEVERLOSE Logo at Top-Left (21px Gotham)
+  T(x + 17, y + 18, 'ANTINEVERLOSE', 21, {ar, ag, ab}, 'gotham', 200)
+  T(x + 15, y + 16, 'ANTINEVERLOSE', 21, {ar, ag, ab}, 'gotham', 150)
+  T(x + 16, y + 17, 'ANTINEVERLOSE', 21, {245, 250, 255}, 'gotham', 255)
+
+  -- 3. Sidebar Categories & Tab Items with Authentic 16x16 Neverlose Icons
+  local ty = y + 66
+  for i, tab in ipairs(TABS) do
+    if tab.cat then
+      ty = ty + 6
+      T(x + 18, ty, tab.cat, 12, {86, 102, 122}, 'ui_bold')
+      ty = ty + 22
+    end
+    local hov = inRect(I.mx, I.my, x + 10, ty, sideW - 20, 34)
+    if hov and I.pressed then
+      MN.tab = i; MN.dd = nil; MN.search = ''; MN.searchFocus = false; I.pressed = false
+    end
+    local sel = (MN.tab == i)
+    if sel then
+      RRect(x + 10, ty, sideW - 20, 34, 17, 52, 82, 255, 6)
+    elseif hov then
+      RRect(x + 10, ty, sideW - 20, 34, 12, 24, 38, 200, 6)
+    end
+    drawIcon(tab.icon, x + 20, ty + 9, 16, ar, ag, ab, 255)
+    T(x + 44, ty + 8, tab.name, 14, sel and {245, 250, 255} or (hov and CT or {185, 198, 215}), 'ui_bold')
+
+    if tab.badge then
+      local bw2 = TW(tab.badge, 11, 'ui_bold') + 14
+      local bx2 = x + sideW - 18 - bw2
+      RRect(bx2, ty + 7, bw2, 20, 14, 44, 70, 255, 5)
+      T(bx2 + 7, ty + 9, tab.badge, 11, {ar, ag, ab}, 'ui_bold')
+    end
+    ty = ty + 38
+  end
+
+  -- 4. Sidebar Bottom Profile Footer
+  local footY = y + h - 58
+  RRect(x, footY, sideW, 1, 14, 26, 38, 255, 1)
+  local me = entity.get_local_player()
+  local nm = (me and entity.get_name(me)) or 'Player'
+  RRect(x + 14, footY + 13, 32, 32, 14, 26, 40, 255, 16)
+  T(x + 25, footY + 21, string.upper(nm:sub(1, 1)), 15, {240, 245, 255}, 'ui_bold')
+  RRect(x + 38, footY + 36, 8, 8, 76, 217, 100, 255, 4)
+  T(x + 54, footY + 13, fit(nm, 162, 13, 'ui_bold'), 13, {240, 245, 255}, 'ui_bold')
+  T(x + 54, footY + 31, 'Till: ', 12, {98, 112, 132}, 'ui_bold')
+  T(x + 84, footY + 31, 'Lifetime', 12, {ar, ag, ab}, 'ui_bold')
+
+  -- 5. Top Header Bar: Floppy Save Button + Slot Button + Search Box + Gear Icon
+  if MN.button(x + sideW + 18, y + 13, 86, 30, 'Save', ar, ag, ab, false, ICONS.save) then
+    MN.say(CFG.save(MN.slot) and ('Saved #' .. MN.slot) or 'Failed')
+  end
+  if MN.button(x + sideW + 112, y + 13, 82, 30, 'Slot #' .. MN.slot, ar, ag, ab, false) then
+    MN.slot = MN.slot % 5 + 1
+  end
+
+  local sbx, sby, sbw, sbh = x + sideW + 204, y + 13, 210, 30
+  if I.pressed and inRect(I.mx, I.my, sbx, sby, sbw, sbh) then
+    MN.searchFocus, UIX.focus, UIX.listen, MN.kpInit = true, nil, nil, false
+    I.pressed = false
+  end
+  RRect(sbx, sby, sbw, sbh, MN.searchFocus and 14 or 8, MN.searchFocus and 30 or 15, MN.searchFocus and 46 or 24, 255, 5)
+  drawIcon(ICONS.search, sbx + 9, sby + 8, 14, ar, ag, ab, 220)
+  local sDisp = (#MN.search > 0 or MN.searchFocus) and MN.search or 'Search...'
+  if MN.searchFocus and math.floor(globals.realtime() * 2) % 2 == 0 then sDisp = sDisp .. '|' end
+  T(sbx + 29, sby + 7, sDisp, 13, (#MN.search > 0 or MN.searchFocus) and CT or {98, 112, 132}, 'ui_bold')
+
+  local gx0, gy0 = x + w - 34, y + 20
+  if I.pressed and inRect(I.mx, I.my, gx0 - 6, gy0 - 6, 28, 28) then
+    MN.tab = #TABS; MN.dd = nil; I.pressed = false
+  end
+  drawIcon(ICONS.gear, gx0, gy0, 16, 200, 212, 228, 255)
+
+  if globals.realtime() - MN.msgAt < 3 then
+    T(sbx + sbw + 12, y + 20, MN.msg, 13, {ar, ag, ab}, 'ui_bold')
+  end
+
+  if I.pressed and (inRect(I.mx, I.my, x, y, sideW, 60) or inRect(I.mx, I.my, sbx + sbw + 4, y, w - (sbx - x + sbw) - 44, topH)) then
+    MN.drag, MN.dx, MN.dy = true, I.mx - x, I.my - y
+    I.pressed = false
+  end
+
+  -- 6. Content Area
+  local cx0, cy0 = x + sideW + 18, y + topH + 16
+  local contentW = w - sideW - 36
+  local colW = math.floor((contentW - 16) / 2)
+  local filter = (#MN.search > 0) and MN.search:lower() or nil
+
+  local tab = TABS[MN.tab]
+  if filter then
+    local allGroups = {'Resolver', 'Ragebot', 'Points', 'Main AA', 'Modifiers', 'Desync', 'Fake lag',
+                       'Binds & reactive', 'Anti-resolver', 'Defensive', 'Smart peek', 'Teleport', 'Visuals', 'Killsay'}
+    local gyL, gyR = cy0, cy0
+    for idx, g in ipairs(allGroups) do
+      if idx % 2 == 1 then
+        gyL = MN.groupPanel(g, cx0, gyL, colW, ar, ag, ab, filter)
+      else
+        gyR = MN.groupPanel(g, cx0 + colW + 16, gyR, colW, ar, ag, ab, filter)
+      end
+    end
+  elseif tab.special then
+    MN.configsPage(cx0, cy0, contentW, ar, ag, ab)
+  else
+    for ci, groups in ipairs(tab.cols) do
+      local gx = cx0 + (ci - 1) * (colW + 16)
+      local gy = cy0
+      for _, g in ipairs(groups) do
+        gy = MN.groupPanel(g, gx, gy, colW, ar, ag, ab, nil)
+      end
+    end
+  end
+
+  MN.overlayDraw(ar, ag, ab)
+
+  if I.pressed then
+    MN.dd = nil
+    UIX.focus, UIX.listen, MN.searchFocus = nil, nil, false
+  end
+end
+end
+
+UIX.afterApply = function()
+  loadState(curState())
+  refreshAAVis()
+  refreshDefVis()
+  refreshPtsVis()
+  refreshLowVis()
+  updateRes()
+  refreshResVis()
+end
+CFG.init()
+enforceClanTag()
+
+local function drawPeekAnchor(r, g, b)
+  local a = PK.anchor
+  if not a then return end
+  local x, y = renderer.world_to_screen(a.X, a.Y - 12, a.Z)
+  if not x then return end
+  local col = PK.returning and {255, 200, 90} or {r, g, b}
+  RRect(x - 7, y - 7, 14, 14, col[1], col[2], col[3], 220, 7)
+  RText(x, y + 12, PK.returning and 'RETURNING' or 'PEEK ANCHOR', 11, 'code', col, 255, 'center', true)
+end
+
+client.set_event_callback('paint', function()
+  UIX.poll()
+  pollManual()
+  updateMoveBasis()
+  local sw, sh = client.screen_size()
+  local r, g, b = ui.get(V.accent)
+  tpTick(stateIndex())
+  peekTick()
+  drawWatermark(sw, r, g, b)
+  drawBinds(sh, r, g, b)
+  if ui.get(V.ind) then drawIndicators(sw, sh, r, g, b) end
+  if ui.get(V.log) then drawHitlog(sh) end
+  if ui.get(V.restag) and R.enabled then drawResolverTags() end
+  if ui.get(V.rpanel) then drawResolverPanel(sw, sh, r, g, b) end
+  if ui.get(V.dbg) and R.enabled then drawDebug(r, g, b) end
+  if ui.get(KS.on) then drawKillsay(sw, sh, r, g, b) end
+  if ui.get(V.kill) then drawKillPopup(sw, sh, r, g, b) end
+  drawPeekAnchor(r, g, b)
+  if nui.is_menu_open() then
+    pcall(MN.draw, sw, sh, r, g, b)
+  else
+    MN.idle()
+  end
+end)
+
+client.log(NAME .. ' [PRO v6 - Authentic Neverlose Icons & UI] loaded successfully.')
